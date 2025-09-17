@@ -2,4 +2,4 @@
 
 
 - To run execute: 
-python simulator.py --config "settings.json" --with-subscriber
+python simulator.py --config "settings.json" --with-subscriber --duration 30

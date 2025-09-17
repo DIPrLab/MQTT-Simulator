@@ -4,208 +4,52 @@
 	"INCLUDE_MESSAGE_ID": true,
 	"INCLUDE_TIMESTAMP": true,
 	"METADATA_FIELD_PREFIX": "_",
-	"TOPICS": [
-		{
-			"TYPE": "multiple",
-			"PREFIX": "lamp",
-			"RANGE_START": 1,
-			"RANGE_END": 2,
-			"TIME_INTERVAL": 4,
-			"DATA": [
-				{
-					"NAME": "on",
-					"TYPE": "bool",
-					"RETAIN_PROBABILITY": 0.85
-				},
-				{
-					"NAME": "temperature",
-					"TYPE": "int",
-					"INITIAL_VALUE": 2750,
-					"MIN_VALUE": 2700,
-					"MAX_VALUE": 6500,
-					"MAX_STEP": 250,
-					"RETAIN_PROBABILITY": 0.3,
-					"RESET_PROBABILITY": 0.1,
-					"INCREASE_PROBABILITY": 0.8,
-					"RESTART_ON_BOUNDARIES": true
-				}
-			]
-		},
-		{
-			"TYPE": "single",
-			"PREFIX": "air_quality",
-			"TIME_INTERVAL": 6,
-			"DATA": [
-				{
-					"NAME": "pollution_particles",
-					"TYPE": "float",
-					"MIN_VALUE": 0,
-					"MAX_VALUE": 1,
-					"MAX_STEP": 0.15,
-					"RETAIN_PROBABILITY": 0.9
-				},
-				{
-					"NAME": "alert",
-					"TYPE": "bool",
-					"RETAIN_PROBABILITY": 0.9
-				}
-			]
-		},
-		{
-			"TYPE": "list",
-			"PREFIX": "temperature",
-			"LIST": [
-				"roof",
-				"basement"
-			],
-			"TIME_INTERVAL": 8,
-			"DATA": [
-				{
-					"NAME": "temperature",
-					"TYPE": "float",
-					"MIN_VALUE": 20,
-					"MAX_VALUE": 55,
-					"MAX_STEP": 3,
-					"RETAIN_PROBABILITY": 0.5,
-					"INCREASE_PROBABILITY": 0.6
-				}
-			]
-		},
-		{
-			"TYPE": "single",
-			"PREFIX": "freezer",
-			"TIME_INTERVAL": 6,
-			"DATA": [
-				{
-					"NAME": "temperature",
-					"TYPE": "math_expression",
-					"RETAIN_PROBABILITY": 0.1,
-					"MATH_EXPRESSION": "2*math.pow(x,2)+1",
-					"INTERVAL_START": 0,
-					"INTERVAL_END": 5,
-					"MIN_DELTA": 0.3,
-					"MAX_DELTA": 0.5
-				}
-			]
-		},
-		{
-			"TYPE": "single",
-			"PREFIX": "location",
-			"TIME_INTERVAL": 5,
-			"PAYLOAD_ROOT": {
-				"user_id": "abc123"
-			},
-			"DATA": [
-				{
-					"NAME": "position",
-					"TYPE": "raw_values",
-					"RESTART_ON_END": true,
-					"VALUES": [
-						"moving",
-						"stopped"
-					]
-				},
-				{
-					"NAME": "coordinate",
-					"TYPE": "raw_values",
-					"VALUE_DEFAULT": {
-						"alt": 0
-					},
-					"RESTART_ON_END": true,
-					"VALUES": [
-						{
-							"alt": 0.1,
-							"lat": -121.883682,
-							"long": 37.354635
-						},
-						{
-							"lat": -121.883352,
-							"long": 37.354192
-						},
-						{
-							"alt": 0.15,
-							"lat": -121.884284,
-							"long": 37.353757
-						},
-						{
-							"alt": 0.22,
-							"lat": -121.885227,
-							"long": 37.353324
-						}
-					]
-				}
-			]
-		}
+	"TOPIC_DIMENSIONS": [
+		{ "name": "lamp", "range": [1, 5] },
+		{ "name": "room", "list": ["kitchen", "living", "bedroom"] },
+		{ "name": "air_quality", "list": ["pm25", "co2"] },
+		{ "name": "temperature", "list": ["roof", "basement"] },
+		{ "name": "freezer", "list": ["main", "backup"] },
+		{ "name": "location", "list": ["office", "warehouse"] }
 	],
-	"SUBSCRIBERS": [
-		{
-			"TOPIC": "lamp/#",
-			"NUMBER": 2,
-			"DESCRIPTION": "Subscribes to all lamp topics",
-			"USERS": [
-				"user1",
-				"user2"
-			],
-			"PASSWORDS": [
-				"password1",
-				"password2"
-			]
+	"DATA_SCHEMAS": {
+		"lamp": {
+			"on": {"type": "bool"},
+			"temperature": {"type": "int", "min": 2700, "max": 6500}
 		},
-		{
-			"TOPIC": "air_quality",
-			"NUMBER": 3,
-			"DESCRIPTION": "Air quality monitors",
-			"USERS": [
-				"user1",
-				"user2",
-				"user3"
-			],
-			"PASSWORDS": [
-				"password1",
-				"password2",
-				"password3"
-			]
+		"air_quality": {
+			"pm25": {"type": "float", "min": 0, "max": 1},
+			"co2": {"type": "float", "min": 400, "max": 2000}
 		},
-		{
-			"TOPIC": "temperature/#",
-			"NUMBER": 2,
-			"DESCRIPTION": "Temperature sensors in different locations",
-			"USERS": [
-				"user1",
-				"user2"
-			],
-			"PASSWORDS": [
-				"password1",
-				"password2"
-			]
+		"temperature": {
+			"value": {"type": "float", "min": 20, "max": 55}
 		},
-		{
-			"TOPIC": "freezer",
-			"NUMBER": 2,
-			"DESCRIPTION": "Freezer temperature monitor",
-			"USERS": [
-				"user1",
-				"user2"
-			],
-			"PASSWORDS": [
-				"password1",
-				"password2"
-			]
+		"freezer": {
+			"temp": {"type": "float", "min": -30, "max": 0}
 		},
-		{
-			"TOPIC": "location",
-			"NUMBER": 3,
-			"DESCRIPTION": "Location tracking subscribers",
-			"USERS": [
-				"user1",
-				"user2",
-				"user3"
-			],
-			"PASSWORDS": [
-				"password1",
-				"password2",
-				"password3"
-			]
+		"location": {
+			"lat": {"type": "float", "min": -180, "max": 180},
+			"long": {"type": "float", "min": -90, "max": 90}
 		}
-	]
+	},
+	"TIME_INTERVAL": 4,
+	"TOPIC_TYPES": ["lamp", "air_quality", "temperature", "freezer", "location"],
+	"TOPIC_TYPE_DIMENSIONS": {
+		"lamp": ["lamp", "room"],
+		"air_quality": ["air_quality", "room"],
+		"temperature": ["temperature", "room"],
+		"freezer": ["freezer", "location"],
+		"location": ["location"]
+	},
+	"SUBSCRIBERS": {
+		"USERS": ["user1", "user2", "user3"],
+		"PASSWORDS": ["password1", "password2", "password3"],
+		"TOPICS": [
+			"kitchen/#",
+			"living/#",
+			"bedroom/#",
+			"office/#",
+			"warehouse/#"
+		]
+	}
 }

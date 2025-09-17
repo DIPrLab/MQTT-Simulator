@@ -1,56 +1,46 @@
-"""
-Simple MQTT traffic simulator (publisher + optional subscriber).
-
-Features:
-- Reads minimal config from settings.json (BROKER_URL, BROKER_PORT, TOPICS[*].PREFIX, TIME_INTERVAL)
-- Publishes random JSON payloads to each topic at the specified interval
-- Adds metadata fields: _message_id, _timestamp
-- Optional subscriber that logs received messages and basic latency if timestamp present
-
-Usage:
-  python simple_simulator.py --config settings.json --with-subscriber --duration 60
-
-Dependencies:
-  pip install paho-mqtt
-"""
-
-import argparse
-import json
-import os
-import random
-import threading
 import time
+import json
+import argparse
+import threading
 import uuid
-from typing import List
-
+import random
 import paho.mqtt.client as mqtt
-
+from typing import List
+import itertools
 
 def load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def resolve_topics(cfg: dict) -> List[dict]:
-    topics_cfg = cfg.get("TOPICS", [])
-    topics: List[dict] = []
-    for t in topics_cfg:
-        t_type = t.get("TYPE", "single")
-        prefix = t.get("PREFIX", "topic")
-        interval = int(t.get("TIME_INTERVAL", 5))
+    dims = cfg.get("TOPIC_DIMENSIONS", [])
+    interval = int(cfg.get("TIME_INTERVAL", 5))
+    # Map dimension names to their values
+    dim_map = {}
+    for d in dims:
+        if "range" in d:
+            start, end = d["range"]
+            dim_map[d["name"]] = [str(i) for i in range(start, end+1)]
+        elif "list" in d:
+            dim_map[d["name"]] = [str(x) for x in d["list"]]
+        else:
+            dim_map[d["name"]] = ["unknown"]
 
-        if t_type == "multiple":
-            start = int(t.get("RANGE_START", 1))
-            end = int(t.get("RANGE_END", 1))
-            for i in range(start, end + 1):
-                topics.append({"topic": f"{prefix}/{i}", "interval": interval})
-        elif t_type == "list":
-            for name in t.get("LIST", []):
-                topics.append({"topic": f"{prefix}/{name}", "interval": interval})
-        else:  # single
-            topics.append({"topic": prefix, "interval": interval})
+    # Load topic types and dimension mappings from config
+    topic_types = cfg.get("TOPIC_TYPES", ["lamp"])
+    topic_dims = cfg.get("TOPIC_TYPE_DIMENSIONS", {})
+    topics = []
+    for ttype in topic_types:
+        dims_for_type = topic_dims.get(ttype, [])
+        # Reverse the dimension order for topic formatting
+        values_for_type = [dim_map[d] for d in reversed(dims_for_type) if d in dim_map]
+        for combo in itertools.product(*values_for_type):
+            topic = "/".join(combo)
+            if not topic:
+                print(f"[WARN] Skipping empty topic for type '{ttype}' and combo {combo}")
+                continue
+            topics.append({"topic": topic, "interval": interval, "type": ttype})
     return topics
-
 
 def mqtt_protocol_from_int(protocol_int: int):
     # Map int to paho constants (4 -> v3.1.1, 5 -> v5)
@@ -80,7 +70,6 @@ class Publisher(threading.Thread):
                 payload = {
                     "value": random.random(),
                     "_message_id": str(uuid.uuid4()),
-                    # milliseconds since epoch
                     "_timestamp": int(time.time() * 1000),
                 }
                 payload_str = json.dumps(payload)
@@ -94,7 +83,6 @@ class Publisher(threading.Thread):
         self._running.clear()
 
 
-
 class Subscriber(threading.Thread):
     def __init__(self, broker_host: str, broker_port: int, topics: List[str], protocol: int):
         super().__init__(daemon=True)
@@ -102,11 +90,24 @@ class Subscriber(threading.Thread):
         self.broker_port = broker_port
         self.topics = topics
         self.client = mqtt.Client(client_id=f"sub-{uuid.uuid4().hex[:8]}", protocol=mqtt_protocol_from_int(protocol))
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
         self._running = threading.Event()
         self._running.set()
+        self.latencies = []
 
-    def on_connect(self, client, userdata, flags, rc, properties=None):
-        print(f"[SUB] Connected rc={rc}; subscribing to topics: {self.topics}")
+    def run(self):
+        self.client.connect(self.broker_host, self.broker_port, keepalive=60)
+        self.client.loop_start()
+        try:
+            while self._running.is_set():
+                time.sleep(1)
+        finally:
+            self.client.loop_stop()
+            self.client.disconnect()
+
+    def on_connect(self, client, userdata, flags, reasonCode, properties=None):
+        print(f"[SUB] Connected reasonCode={reasonCode}; subscribing to topics: {self.topics}")
         for topic in self.topics:
             client.subscribe(topic)
 
@@ -115,26 +116,28 @@ class Subscriber(threading.Thread):
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
             ts = payload.get("_timestamp")
-            latency = f" latency={recv_ms - ts}ms" if isinstance(ts, int) else ""
-            mid = payload.get("_message_id", "-")
-            print(f"[SUB] {msg.topic} mid={mid}{latency} size={len(msg.payload)}")
+            if isinstance(ts, int):
+                latency = recv_ms - ts
+                self.latencies.append(latency)
+                mid = payload.get("_message_id", "-")
+                print(f"[SUB] {msg.topic} mid={mid} latency={latency}ms size={len(msg.payload)}")
+            else:
+                print(f"[SUB] {msg.topic} size={len(msg.payload)} (no timestamp)")
         except Exception:
             print(f"[SUB] {msg.topic} size={len(msg.payload)} (non-JSON)")
 
-    def run(self):
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
-        self.client.connect(self.broker_host, self.broker_port, keepalive=60)
-        self.client.loop_start()
-        try:
-            while self._running.is_set():
-                time.sleep(0.2)
-        finally:
-            self.client.loop_stop()
-            self.client.disconnect()
-
     def stop(self):
         self._running.clear()
+
+    def print_latency_stats(self):
+        if not self.latencies:
+            print("No latency data recorded.")
+            return
+        print("\n--- Latency Stats ---")
+        print(f"Count: {len(self.latencies)}")
+        print(f"Min: {min(self.latencies)} ms")
+        print(f"Max: {max(self.latencies)} ms")
+        print(f"Avg: {sum(self.latencies)/len(self.latencies):.2f} ms")
 
 
 def main():
@@ -153,9 +156,6 @@ def main():
     protocol = int(cfg.get("PROTOCOL_VERSION", 4))
 
     topics = resolve_topics(cfg)
-    if not topics:
-        print("No topics configured in settings.json -> TOPICS. Exiting.")
-        return
 
     print(f"Broker: {host}:{port} | Topics: {len(topics)} | Duration: {args.duration or 'infinite'}s")
 
@@ -168,8 +168,14 @@ def main():
 
     sub = None
     if args.with_subscriber:
-        # Subscribe only to the exact topics being published
-        topic_names = [t["topic"] for t in topics]
+        subs_cfg = cfg.get("SUBSCRIBERS", {})
+        # Use the new structure: TOPICS, USERS, PASSWORDS
+        topic_names = subs_cfg.get("TOPICS")
+        if not topic_names:
+            # fallback to all published topics if not present
+            topic_names = [t["topic"] for t in topics]
+        # Credentials are available as subs_cfg["USERS"] and subs_cfg["PASSWORDS"]
+        # If you want to use credentials, you can pass them to Subscriber or use them for authentication
         sub = Subscriber(host, port, topic_names, protocol=protocol)
         sub.start()
 
@@ -186,6 +192,7 @@ def main():
             p.stop()
         if sub:
             sub.stop()
+            sub.print_latency_stats()
         # Allow threads to exit cleanly
         time.sleep(1)
         print("Stopped.")
