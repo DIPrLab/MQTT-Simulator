@@ -26,20 +26,17 @@ def resolve_topics(cfg: dict) -> List[dict]:
         else:
             dim_map[d["name"]] = ["unknown"]
 
-    # Load topic types and dimension mappings from config
-    topic_types = cfg.get("TOPIC_TYPES", ["lamp"])
-    topic_dims = cfg.get("TOPIC_TYPE_DIMENSIONS", {})
+    # Generate topics based on config
     topics = []
-    for ttype in topic_types:
-        dims_for_type = topic_dims.get(ttype, [])
-        # Reverse the dimension order for topic formatting
-        values_for_type = [dim_map[d] for d in reversed(dims_for_type) if d in dim_map]
-        for combo in itertools.product(*values_for_type):
+    for ttype in cfg.get("TOPIC_TYPES", ["lamp"]):
+        dims = cfg.get("TOPIC_TYPE_DIMENSIONS", {}).get(ttype, [])
+        combos = itertools.product(*(dim_map[d] for d in reversed(dims) if d in dim_map))
+        for combo in combos:
             topic = "/".join(combo)
-            if not topic:
+            if topic:
+                topics.append({"topic": topic, "interval": interval, "type": ttype})
+            else:
                 print(f"[WARN] Skipping empty topic for type '{ttype}' and combo {combo}")
-                continue
-            topics.append({"topic": topic, "interval": interval, "type": ttype})
     return topics
 
 def mqtt_protocol_from_int(protocol_int: int):
