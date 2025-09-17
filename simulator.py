@@ -63,15 +63,43 @@ class Publisher(threading.Thread):
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
         try:
+            # Extract schema type from topic info if available
+            schema_type = getattr(self, 'schema_type', None)
+            # If not set, try to infer from topic name
+            if not schema_type:
+                # Use the first part of the topic as type if it matches a schema
+                schema_type = self.topic.split("/")[0]
+            # Load schemas from config if available
+            schemas = getattr(self, 'schemas', {})
+            schema = schemas.get(schema_type, {})
+            # Prepare value generators for each field
+            def gen_value(field):
+                ftype = field.get("type")
+                if ftype == "bool":
+                    return [True, False]
+                elif ftype == "int":
+                    return list(range(field.get("min", 0), field.get("max", 10)+1))
+                elif ftype == "float":
+                    # Use 5 evenly spaced values in range
+                    mn, mx = field.get("min", 0), field.get("max", 1)
+                    return [round(mn + i*(mx-mn)/4, 2) for i in range(5)]
+                else:
+                    return [None]
+            # Get all possible value combinations for schema fields
+            fields = list(schema.keys())
+            value_lists = [gen_value(schema[f]) for f in fields]
+            combos = list(itertools.product(*value_lists)) if fields else [()]
             while self._running.is_set():
-                payload = {
-                    "value": random.random(),
-                    "_message_id": str(uuid.uuid4()),
-                    "_timestamp": int(time.time() * 1000),
-                }
-                payload_str = json.dumps(payload)
-                self.client.publish(self.topic, payload_str, qos=self.qos, retain=self.retain)
-                time.sleep(self.interval)
+                for values in combos:
+                    payload = {f: v for f, v in zip(fields, values)}
+                    payload["_message_id"] = str(uuid.uuid4())
+                    payload["_timestamp"] = int(time.time() * 1000)
+                    payload_str = json.dumps(payload)
+                    self.client.publish(self.topic, payload_str, qos=self.qos, retain=self.retain)
+                    time.sleep(self.interval)
+                # If only one combo, avoid tight loop
+                if not combos or len(combos) == 1:
+                    time.sleep(self.interval)
         finally:
             self.client.loop_stop()
             self.client.disconnect()
@@ -117,7 +145,7 @@ class Subscriber(threading.Thread):
                 latency = recv_ms - ts
                 self.latencies.append(latency)
                 mid = payload.get("_message_id", "-")
-                print(f"[SUB] {msg.topic} mid={mid} latency={latency}ms size={len(msg.payload)}")
+                print(f"[SUB] {msg.topic} mid={mid} latency={latency}ms size={len(msg.payload)} payload={payload}")
             else:
                 print(f"[SUB] {msg.topic} size={len(msg.payload)} (no timestamp)")
         except Exception:
@@ -157,8 +185,12 @@ def main():
     print(f"Broker: {host}:{port} | Topics: {len(topics)} | Duration: {args.duration or 'infinite'}s")
 
     pubs: List[Publisher] = []
+    schemas = cfg.get("DATA_SCHEMAS", {})
     for t in topics:
         p = Publisher(host, port, t["topic"], t["interval"], protocol=protocol, qos=args.qos, retain=args.retain)
+        # Attach schema type and schemas to publisher for value generation
+        p.schema_type = t["type"]
+        p.schemas = schemas
         p.start()
         pubs.append(p)
         print(f"[PUB] Started -> {t['topic']} every {t['interval']}s")
