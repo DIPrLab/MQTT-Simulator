@@ -175,7 +175,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    # Prefer settings.json, fallback to a public test broker to avoid connection-refused errors
+
     host = cfg.get("BROKER_URL") or "test.mosquitto.org"
     port = int(cfg.get("BROKER_PORT", 1883))
     protocol = int(cfg.get("PROTOCOL_VERSION", 4))
@@ -186,27 +186,27 @@ def main():
 
     pubs: List[Publisher] = []
     schemas = cfg.get("DATA_SCHEMAS", {})
+    # Start all publishers in parallel threads
     for t in topics:
         p = Publisher(host, port, t["topic"], t["interval"], protocol=protocol, qos=args.qos, retain=args.retain)
-        # Attach schema type and schemas to publisher for value generation
         p.schema_type = t["type"]
         p.schemas = schemas
         p.start()
         pubs.append(p)
         print(f"[PUB] Started -> {t['topic']} every {t['interval']}s")
 
-    sub = None
+    subs: List[Subscriber] = []
     if args.with_subscriber:
         subs_cfg = cfg.get("SUBSCRIBERS", {})
-        # Use the new structure: TOPICS, USERS, PASSWORDS
         topic_names = subs_cfg.get("TOPICS")
         if not topic_names:
-            # fallback to all published topics if not present
             topic_names = [t["topic"] for t in topics]
-        # Credentials are available as subs_cfg["USERS"] and subs_cfg["PASSWORDS"]
-        # If you want to use credentials, you can pass them to Subscriber or use them for authentication
-        sub = Subscriber(host, port, topic_names, protocol=protocol)
-        sub.start()
+
+        for topic in topic_names:
+            sub = Subscriber(host, port, [topic], protocol=protocol)
+            sub.start()
+            subs.append(sub)
+            print(f"[SUB] Started -> {topic}")
 
     try:
         if args.duration and args.duration > 0:
@@ -219,10 +219,9 @@ def main():
     finally:
         for p in pubs:
             p.stop()
-        if sub:
+        for sub in subs:
             sub.stop()
             sub.print_latency_stats()
-        # Allow threads to exit cleanly
         time.sleep(1)
         print("Stopped.")
 
