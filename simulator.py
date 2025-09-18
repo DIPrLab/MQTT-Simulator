@@ -40,7 +40,6 @@ def resolve_topics(cfg: dict) -> List[dict]:
     return topics
 
 def mqtt_protocol_from_int(protocol_int: int):
-    # Map int to paho constants (4 -> v3.1.1, 5 -> v5)
     if protocol_int == 5:
         return mqtt.MQTTv5
     return mqtt.MQTTv311
@@ -120,6 +119,9 @@ class Subscriber(threading.Thread):
         self._running = threading.Event()
         self._running.set()
         self.latencies = []
+        self.csv_file = f"subscriber_{'_'.join(topics).replace('/', '_').replace('#', 'all')}.csv"
+        self.csv_fp = open(self.csv_file, "w", encoding="utf-8")
+        self.csv_fp.write("topic,size,latency,payload\n")
 
     def run(self):
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
@@ -130,6 +132,7 @@ class Subscriber(threading.Thread):
         finally:
             self.client.loop_stop()
             self.client.disconnect()
+            self.csv_fp.close()
 
     def on_connect(self, client, userdata, flags, reasonCode, properties=None):
         print(f"[SUB] Connected reasonCode={reasonCode}; subscribing to topics: {self.topics}")
@@ -146,6 +149,7 @@ class Subscriber(threading.Thread):
                 self.latencies.append(latency)
                 mid = payload.get("_message_id", "-")
                 print(f"[SUB] {msg.topic} mid={mid} latency={latency}ms size={len(msg.payload)} payload={payload}")
+                self.csv_fp.write(f"{msg.topic},{len(msg.payload)},{latency},\"{json.dumps(payload)}\"\n")
             else:
                 print(f"[SUB] {msg.topic} size={len(msg.payload)} (no timestamp)")
         except Exception:
