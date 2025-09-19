@@ -13,8 +13,9 @@ def load_config(path: str) -> dict:
         return json.load(f)
 
 def resolve_topics(cfg: dict) -> List[dict]:
-    dims = cfg.get("TOPIC_DIMENSIONS", [])
-    interval = int(cfg.get("TIME_INTERVAL", 5))
+    topics_cfg = cfg.get("topics", {})
+    dims = topics_cfg.get("dimensions", [])
+    interval = int(cfg.get("publish_interval", 5))
     # Map dimension names to their values
     dim_map = {}
     for d in dims:
@@ -28,8 +29,8 @@ def resolve_topics(cfg: dict) -> List[dict]:
 
     # Generate topics based on config
     topics = []
-    for ttype in cfg.get("TOPIC_TYPES", ["lamp"]):
-        dims = cfg.get("TOPIC_TYPE_DIMENSIONS", {}).get(ttype, [])
+    for ttype in topics_cfg.get("types", ["lamp"]):
+        dims = topics_cfg.get("type_dimensions", {}).get(ttype, [])
         combos = itertools.product(*(dim_map[d] for d in reversed(dims) if d in dim_map))
         for combo in combos:
             topic = "/".join(combo)
@@ -62,7 +63,7 @@ class Publisher(threading.Thread):
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
         try:
-            # Extract schema type from topic info if available
+            # Extract schema type from topic info
             schema_type = getattr(self, 'schema_type', None)
             # If not set, try to infer from topic name
             if not schema_type:
@@ -108,7 +109,7 @@ class Publisher(threading.Thread):
 
 
 class Subscriber(threading.Thread):
-    def __init__(self, broker_host: str, broker_port: int, topics: List[str], protocol: int):
+    def __init__(self, broker_host: str, broker_port: int, topics: List[str], protocol: int, instance: int = 1):
         super().__init__(daemon=True)
         self.broker_host = broker_host
         self.broker_port = broker_port
@@ -119,7 +120,7 @@ class Subscriber(threading.Thread):
         self._running = threading.Event()
         self._running.set()
         self.latencies = []
-        self.csv_file = f"subscriber_{'_'.join(topics).replace('/', '_').replace('#', 'all')}.csv"
+        self.csv_file = f"subscriber_{'_'.join(topics).replace('/', '_').replace('#', 'all')}_instance{instance}.csv"
         self.csv_fp = open(self.csv_file, "w", encoding="utf-8")
         self.csv_fp.write("topic,size,latency,payload\n")
 
@@ -176,41 +177,45 @@ def main():
     parser.add_argument("--duration", type=int, default=30, help="How long to run in seconds (0 = run forever)")
     parser.add_argument("--qos", type=int, default=0, choices=[0,1,2], help="QoS for publishes")
     parser.add_argument("--retain", action="store_true", help="Publish messages with retain flag")
+    parser.add_argument("--publishers-per-topic", type=int, default=1, help="Number of publishers per topic")
+    parser.add_argument("--subscribers-per-topic", type=int, default=1, help="Number of subscribers per topic")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
-    host = cfg.get("BROKER_URL") or "test.mosquitto.org"
-    port = int(cfg.get("BROKER_PORT", 1883))
-    protocol = int(cfg.get("PROTOCOL_VERSION", 4))
+    broker_cfg = cfg.get("broker", {})
+    host = broker_cfg.get("url", "test.mosquitto.org")
+    port = int(broker_cfg.get("port", 1883))
+    protocol = int(cfg.get("protocol_version", 4))
 
     topics = resolve_topics(cfg)
 
     print(f"Broker: {host}:{port} | Topics: {len(topics)} | Duration: {args.duration or 'infinite'}s")
 
     pubs: List[Publisher] = []
-    schemas = cfg.get("DATA_SCHEMAS", {})
-    # Start all publishers in parallel threads
+    schemas = cfg.get("schemas", {})
     for t in topics:
-        p = Publisher(host, port, t["topic"], t["interval"], protocol=protocol, qos=args.qos, retain=args.retain)
-        p.schema_type = t["type"]
-        p.schemas = schemas
-        p.start()
-        pubs.append(p)
-        print(f"[PUB] Started -> {t['topic']} every {t['interval']}s")
+        for i in range(args.publishers_per_topic):
+            p = Publisher(host, port, t["topic"], t["interval"], protocol=protocol, qos=args.qos, retain=args.retain)
+            p.schema_type = t["type"]
+            p.schemas = schemas
+            p.start()
+            pubs.append(p)
+            print(f"[PUB] Started -> {t['topic']} every {t['interval']}s (instance {i+1})")
 
     subs: List[Subscriber] = []
     if args.with_subscriber:
-        subs_cfg = cfg.get("SUBSCRIBERS", {})
-        topic_names = subs_cfg.get("TOPICS")
+        subs_cfg = cfg.get("subscribers", {})
+        topic_names = subs_cfg.get("topics")
         if not topic_names:
             topic_names = [t["topic"] for t in topics]
 
         for topic in topic_names:
-            sub = Subscriber(host, port, [topic], protocol=protocol)
-            sub.start()
-            subs.append(sub)
-            print(f"[SUB] Started -> {topic}")
+            for i in range(args.subscribers_per_topic):
+                sub = Subscriber(host, port, [topic], protocol=protocol, instance=i+1)
+                sub.start()
+                subs.append(sub)
+                print(f"[SUB] Started -> {topic} (instance {i+1})")
 
     try:
         if args.duration and args.duration > 0:

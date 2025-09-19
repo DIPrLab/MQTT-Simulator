@@ -1,18 +1,27 @@
 {
-	"BROKER_URL": "test.mosquitto.org",
-	"BROKER_PORT": 1883,
-	"INCLUDE_MESSAGE_ID": true,
-	"INCLUDE_TIMESTAMP": true,
-	"METADATA_FIELD_PREFIX": "_",
-	"TOPIC_DIMENSIONS": [
-		{ "name": "lamp", "range": [1, 5] },
-		{ "name": "room", "list": ["kitchen", "living", "bedroom"] },
-		{ "name": "air_quality", "list": ["pm25", "co2"] },
-		{ "name": "temperature", "list": ["roof", "basement"] },
-		{ "name": "freezer", "list": ["main", "backup"] },
-		{ "name": "location", "list": ["office", "warehouse"] }
-	],
-	"DATA_SCHEMAS": {
+	"broker": {
+		"url": "test.mosquitto.org",
+		"port": 1883
+	},
+	"topics": {
+		"dimensions": [
+			{ "name": "lamp", "range": [1, 5] },
+			{ "name": "room", "list": ["kitchen", "living", "bedroom"] },
+			{ "name": "air_quality", "list": ["pm25", "co2"] },
+			{ "name": "temperature", "list": ["roof", "basement"] },
+			{ "name": "freezer", "list": ["main", "backup"] },
+			{ "name": "location", "list": ["office", "warehouse"] }
+		],
+		"types": ["lamp", "air_quality", "temperature", "freezer", "location"],
+		"type_dimensions": {
+			"lamp": ["lamp", "room"],
+			"air_quality": ["air_quality", "room"],
+			"temperature": ["temperature", "room"],
+			"freezer": ["freezer", "location"],
+			"location": ["location"]
+		}
+	},
+	"schemas": {
 		"lamp": {
 			"on": {"type": "bool"},
 			"temperature": {"type": "int", "min": 2700, "max": 6500}
@@ -32,24 +41,10 @@
 			"long": {"type": "float", "min": -90, "max": 90}
 		}
 	},
-	"TIME_INTERVAL": 1,
-	"TOPIC_TYPES": ["lamp", "air_quality", "temperature", "freezer", "location"],
-	"TOPIC_TYPE_DIMENSIONS": {
-		"lamp": ["lamp", "room"],
-		"air_quality": ["air_quality", "room"],
-		"temperature": ["temperature", "room"],
-		"freezer": ["freezer", "location"],
-		"location": ["location"]
-	},
-	"SUBSCRIBERS": {
-		"USERS": ["user1", "user2", "user3"],
-		"PASSWORDS": ["password1", "password2", "password3"],
-		"TOPICS": [
-			"kitchen/#",
-			"living/#",
-			"bedroom/#",
-			"office/#",
-			"warehouse/#"
-		]
+	"publish_interval": 1,
+	"subscribers": {
+		"topics": ["kitchen/#", "living/#", "bedroom/#", "office/#", "warehouse/#"],
+		"users": ["user1", "user2", "user3"],
+		"passwords": ["password1", "password2", "password3"]
 	}
 }

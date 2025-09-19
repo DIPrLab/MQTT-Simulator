@@ -25,4 +25,4 @@
 ## Running the Simulator
 
 To run execute:
-python simulator.py --config "settings.json" --with-subscriber --duration 30
+python simulator.py --config "settings.json" --with-subscriber --publishers-per-topic 3 --subscribers-per-topic 2 --duration 30
