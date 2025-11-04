@@ -172,7 +172,7 @@ class Subscriber(threading.Thread):
 
 def main():
     parser = argparse.ArgumentParser(description="Simple MQTT traffic simulator")
-    parser.add_argument("--config", default="settings.json", help="Path to settings.json")
+    parser.add_argument("--config", default="message_settings.json", help="Path to settings.json")
     parser.add_argument("--with-subscriber", action="store_true", help="Start a subscriber for all published topics")
     parser.add_argument("--duration", type=int, default=30, help="How long to run in seconds (0 = run forever)")
     parser.add_argument("--qos", type=int, default=0, choices=[0,1,2], help="QoS for publishes")

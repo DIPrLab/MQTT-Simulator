@@ -25,4 +25,6 @@
 ## Running the Simulator
 
 To run execute:
-python simulator.py --config "settings.json" --with-subscriber --publishers-per-topic 3 --subscribers-per-topic 2 --duration 30
+python message_simulator.py --config "message_settings.json" --with-subscriber --publishers-per-topic 3 --subscribers-per-topic 2 --duration 30
+
+python policy_simulator.py --config "policy_settings.json" --out ".\generated_policies.sql"

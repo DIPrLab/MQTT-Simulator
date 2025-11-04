@@ -1,0 +1,157 @@
+{
+  "users": [
+    {"userid": 1, "clientid": "", "username": "i0v", "password": "i0v"},
+    {"userid": 2, "clientid": "", "username": "e0a", "password": "e0a"},
+    {"userid": 3, "clientid": "", "username": "e0f", "password": "e0f"},
+    {"userid": 4, "clientid": "", "username": "e0v", "password": "e0v"},
+    {"userid": 5, "clientid": "", "username": "e1a", "password": "e1a"},
+    {"userid": 6, "clientid": "", "username": "e1f", "password": "e1f"},
+    {"userid": 7, "clientid": "", "username": "e1v", "password": "e1v"},
+    {"userid": 8, "clientid": "", "username": "e2a", "password": "e2a"},
+    {"userid": 9, "clientid": "", "username": "e2f", "password": "e2f"},
+    {"userid": 10, "clientid": "", "username": "e2v", "password": "e2v"},
+    {"userid": 11, "clientid": "", "username": "m2a", "password": "m2a"},
+    {"userid": 12, "clientid": "", "username": "m2f", "password": "m2f"},
+    {"userid": 13, "clientid": "", "username": "m2v", "password": "m2v"},
+    {"userid": 14, "clientid": "", "username": "s2v", "password": "s2v"},
+    {"userid": 15, "clientid": "", "username": "pv", "password": "pv"},
+    {"userid": 16, "clientid": "", "username": "pub0", "password": "pub0"},
+    {"userid": 17, "clientid": "", "username": "pub1", "password": "pub1"},
+    {"userid": 18, "clientid": "", "username": "pub2", "password": "pub2"}
+  ],
+  "user_attributes": [
+    [1, "role", "intern"],
+    [1, "video", "?true"],
+    [1, "clearance", "#0"],
+
+    [2, "role", "employee"],
+    [2, "alarm", "?true"],
+    [2, "clearance", "#0"],
+
+    [3, "role", "employee"],
+    [3, "facilities", "?true"],
+    [3, "clearance", "#0"],
+
+    [4, "role", "employee"],
+    [4, "video", "?true"],
+    [4, "clearance", "#0"],
+
+    [5, "role", "employee"],
+    [5, "alarm", "?true"],
+    [5, "clearance", "#1"],
+
+    [6, "role", "employee"],
+    [6, "facilities", "?true"],
+    [6, "clearance", "#1"],
+
+    [7, "role", "employee"],
+    [7, "video", "?true"],
+    [7, "clearance", "#1"],
+
+    [8, "role", "employee"],
+    [8, "alarm", "?true"],
+    [8, "clearance", "#2"],
+
+    [9, "role", "employee"],
+    [9, "facilities", "?true"],
+    [9, "clearance", "#2"],
+
+    [10, "role", "employee"],
+    [10, "video", "?true"],
+    [10, "clearance", "#2"],
+
+    [11, "role", "manager"],
+    [11, "alarm", "?true"],
+    [11, "clearance", "#2"],
+
+    [12, "role", "manager"],
+    [12, "facilities", "?true"],
+    [12, "clearance", "#2"],
+
+    [13, "role", "manager"],
+    [13, "video", "?true"],
+    [13, "clearance", "#2"],
+
+    [14, "role", "security"],
+    [14, "video", "?true"],
+    [14, "clearance", "#2"],
+
+    [15, "role", "public"],
+    [15, "video", "?true"],
+    [15, "clearance", "#0"],
+
+    [16, "sensitivity", "#0"],
+    [17, "sensitivity", "#1"],
+    [18, "sensitivity", "#2"]
+  ],
+  "expansions": {
+    "buildings": ["bldg1","bldg2","bldg3"],
+    "floors": ["f1","f2","f3","f4"],
+    "rooms": ["1","2","3","4","5"],
+    "device_types": ["cam","proximity","thermostat","tstat"]
+  },
+  "action_probabilities": {
+    "grant": 0.7,
+    "deny": 0.3,
+    "filter": 0.0
+  },
+  "base_policies": [
+    {
+      "topic_template": "{b}/{fl}/{r}/{dev}/#",
+      "static": "subj.video ?? false",
+      "dynamic": "",
+      "filter": "",
+      "hints": "subj",
+      "action": "grant",
+      "priority": 10,
+      "expand_on": ["buildings","floors","rooms"],
+      "devices": ["cam","proximity"]
+    },
+    {
+      "topic_template": "{b}/{fl}/{r}/tstat/#",
+      "static": "subj.facilities ?? false",
+      "dynamic": "",
+      "filter": "",
+      "hints": "subj",
+      "action": "grant",
+      "priority": 10,
+      "expand_on": ["buildings","floors","rooms"],
+      "devices": ["tstat"]
+    },
+    {
+      "topic_template": "{b}/f3/+/cam/#",
+      "static": "subj.clearance<2",
+      "dynamic": "",
+      "filter": "",
+      "hints": "subj",
+      "action": "deny",
+      "priority": 5,
+      "expand_on": ["buildings"],
+      "devices": []
+    },
+    {
+      "topic_template": "#",
+      "static": "",
+      "dynamic": "obj.sensitivity > subj.clearance",
+      "filter": "",
+      "hints": "obj,dsubj",
+      "action": "deny",
+      "priority": 0,
+      "expand_on": [],
+      "devices": []
+    }
+    ,
+    {
+      "topic_template": "#",
+      "static": "",
+      "dynamic": "between_hours('{v}:00','{v_plus}:00')",
+      "filter": "",
+      "hints": "ctx",
+      "action": "deny",
+      "priority": 0,
+      "expand_on": [],
+      "devices": [],
+      "range": {"min": 0, "max": 23, "step": 1}
+    }
+  ]
+}
