@@ -391,13 +391,78 @@ def main():
         seen.add(key)
         uniq.append(r)
 
-    # Apply max policies limit
+    # Apply max policies limit with generalization
     max_policies = args.max_policies or cfg.get('max_policies', 1000)
     if max_policies > 0 and len(uniq) > max_policies:
-        print(f'Limiting output to {max_policies} policies (from {len(uniq)} total)')
-        # Sort by priority before truncating to keep highest priority rules
-        uniq.sort(key=lambda x: (-x.get('priority', 0), x.get('topic', '#')))
-        uniq = uniq[:max_policies]
+        print(f'Generalizing and limiting output to {max_policies} policies (from {len(uniq)} total)')
+        
+        # Group rules by their core characteristics
+        by_pattern = {}
+        for rule in uniq:
+            topic = rule['topic']
+            static = rule['static']
+            action = rule['action']
+            priority = rule['priority']
+            
+            # Extract pattern components
+            parts = topic.split('/')
+            if len(parts) >= 4:  # building/floor/room/device pattern
+                # Create more general patterns based on specificity needed
+                building = parts[0]
+                floor = parts[1]
+                
+                # Normalize topic parts and handle device type
+                if '#' in parts[-1]:
+                    device_part = parts[-1].split('#')[0].strip('/')
+                    suffix = '#'
+                else:
+                    device_part = parts[-1]
+                    suffix = ''
+                
+                # Generate increasingly general patterns
+                patterns = [
+                    (f"{building}/{floor}/+/{device_part}{suffix}", 3),  # floor level
+                    (f"{building}/+/+/{device_part}{suffix}", 2),        # building level
+                    (f"+/+/+/{device_part}{suffix}", 1),                # device type level
+                    ("#", 0)                                           # catch-all
+                ]
+                
+                # Use the most specific pattern that helps us meet our limit
+                for pattern, specificity in patterns:
+                    key = (pattern, static, action)
+                    if key not in by_pattern:
+                        by_pattern[key] = {
+                            'rule': {
+                                'topic': pattern,
+                                'static': static,
+                                'dynamic': rule.get('dynamic', ''),
+                                'filter': rule.get('filter', ''),
+                                'hints': rule.get('hints', ''),
+                                'action': action,
+                                'priority': priority
+                            },
+                            'specificity': specificity,
+                            'count': 1
+                        }
+                    else:
+                        by_pattern[key]['count'] += 1
+            else:
+                # Keep non-standard patterns as-is
+                key = (topic, static, action)
+                by_pattern[key] = {
+                    'rule': rule,
+                    'specificity': 4,  # Higher specificity for unique patterns
+                    'count': 1
+                }
+        
+        # Sort by priority, specificity, and rule count
+        generalized = sorted(
+            by_pattern.values(),
+            key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count'])
+        )
+        
+        # Take top rules up to max_policies
+        uniq = [item['rule'] for item in generalized[:max_policies]]
 
     write_sql(cfg, uniq, args.out)
     print(f'Wrote {len(uniq)} rules to {args.out}')
