@@ -104,6 +104,21 @@
   },
   "clearance_priority_multiplier": 2,
   "security_restriction_bonus": 5,
+  "role_restrictions": {
+    "intern": [
+      {
+        "topic_template": "{b}/#",
+        "building_suffix": "2",
+        "priority_offset_config": "security_restriction_bonus",
+        "action": "deny"
+      },
+      {
+        "topic_template": "{b}/f3/#",
+        "action": "deny",
+        "priority": 1
+      }
+    ]
+  },
   "max_policies": 1000,
   "base_policies": [
     {

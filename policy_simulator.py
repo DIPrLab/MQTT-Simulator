@@ -21,7 +21,6 @@ def format_value(val) -> str:
 
 
 def choose_action(policy: dict, cfg: dict) -> str:
-    """Choose an action ('grant'|'deny'|'filter') based on policy-level or global probabilities."""
     probs = policy.get('action_probabilities') or cfg.get('action_probabilities') or {}
     if not probs:
         return policy.get('action', 'deny')
@@ -164,13 +163,6 @@ def expand_base_policies(cfg: dict) -> List[dict]:
 
 
 def generate_user_attribute_rules(cfg: dict) -> List[dict]:
-    """Generate allow/deny rules per user based on their attributes.
-
-    Produces rules that:
-    - Grant access to device topics when a user has the matching attribute (e.g. video -> cam)
-    - Deny access to sensitive buildings/areas for interns
-    - Emit per-user static rules (subj.username == ...) so tests can target individual users
-    """
     ex = cfg.get('expansions', {})
     build_list = ex.get('buildings', [""])
     floor_list = ex.get('floors', [""])
@@ -200,9 +192,7 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         if not username:
             continue
 
-        # interns denied to some places (example rules)
         role = attrs.get('role', '')
-        # Get base priority from config, default to 1 if not found
         base_priority = cfg.get('role_priorities', {}).get(role, 1)
         
         # Adjust priority by clearance using configured multiplier
@@ -210,14 +200,72 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         multiplier = cfg.get('clearance_priority_multiplier', 2)
         base_priority += clearance * multiplier
 
-        if role == 'intern':
-            # deny interns to building2 entirely and to high security floors
-            for b in build_list:
-                if not b:
-                    continue
-                # bldg2 in particular
-                if b.endswith('2'):
-                    topic = f"{b}/#"
+        # Apply role-based restrictions from config if provided. This makes restrictions
+        # dynamic per-role instead of hardcoding behavior for 'intern'. The config key
+        # `role_restrictions` should map a role to a list of restriction definitions.
+        # Each restriction supports a `topic_template` with {b} and {fl}, an optional
+        # `building_suffix` filter, an `action`, and numeric `priority` or
+        # `priority_offset_config` which references a numeric value in the config.
+        role_restrictions = cfg.get('role_restrictions', {})
+        restrictions = role_restrictions.get(role, [])
+        if restrictions:
+            for rdef in restrictions:
+                t_template = rdef.get('topic_template', '{b}/#')
+                action_name = rdef.get('action', 'deny')
+                # base offset (can be numeric) plus optional config-provided offset
+                priority_offset = int(rdef.get('priority', 0) or 0)
+                if 'priority_offset_config' in rdef:
+                    try:
+                        priority_offset += int(cfg.get(rdef['priority_offset_config'], 0))
+                    except Exception:
+                        pass
+
+                for b in build_list:
+                    if not b:
+                        continue
+                    # optional building filter (e.g. endswith '2')
+                    if 'building_suffix' in rdef and not b.endswith(rdef['building_suffix']):
+                        continue
+
+                    # allow an explicit floor in the rule definition, otherwise leave placeholder
+                    fl_spec = rdef.get('floor', '')
+                    try:
+                        topic = t_template.format(b=b, fl=fl_spec)
+                    except Exception:
+                        topic = t_template
+                    topic = topic.replace('//', '/').strip('/')
+                    if topic == '':
+                        topic = '#'
+
+                    action = choose_action({'action': action_name}, cfg)
+                    rules.append({
+                        'topic': topic,
+                        'static': f"subj.username=='{username}'",
+                        'dynamic': '',
+                        'filter': '',
+                        'hints': 'subj',
+                        'action': action,
+                        'priority': base_priority + priority_offset
+                    })
+        else:
+            # Backwards-compatible fallback: original intern-specific rules if no config provided
+            if role == 'intern':
+                for b in build_list:
+                    if not b:
+                        continue
+                    if b.endswith('2'):
+                        topic = f"{b}/#"
+                        action = choose_action({'action': 'deny'}, cfg)
+                        rules.append({
+                            'topic': topic,
+                            'static': f"subj.username=='{username}'",
+                            'dynamic': '',
+                            'filter': '',
+                            'hints': 'subj',
+                            'action': action,
+                            'priority': base_priority + cfg.get('security_restriction_bonus', 5)
+                        })
+                    topic = f"{b}/f3/#"
                     action = choose_action({'action': 'deny'}, cfg)
                     rules.append({
                         'topic': topic,
@@ -226,20 +274,8 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         'filter': '',
                         'hints': 'subj',
                         'action': action,
-                        'priority': base_priority + cfg.get('security_restriction_bonus', 5)  # Add configured bonus for security restrictions
+                        'priority': 1
                     })
-                # deny interns from third-floor camera areas
-                topic = f"{b}/f3/#"
-                action = choose_action({'action': 'deny'}, cfg)
-                rules.append({
-                    'topic': topic,
-                    'static': f"subj.username=='{username}'",
-                    'dynamic': '',
-                    'filter': '',
-                    'hints': 'subj',
-                    'action': action,
-                    'priority': 1
-                })
 
         # For each attribute that maps to devices, grant per-user access to those device topics
         for aname, aval in attrs.items():
@@ -364,7 +400,6 @@ def write_sql(cfg: dict, rules: List[dict], out_path: str):
                 topic=topic, static=static, dynamic=dynamic, filter=flt, hints=hints, action=action, prio=prio
             ))
 
-        # SQL requires matching columns - we will explicitly list columns to match values order
         f.write('insert into rules (topic, static, dynamic, filter, hints, action, priority) values\n')
         f.write(',\n'.join(insert_rows) + ';\n')
 
@@ -455,14 +490,38 @@ def main():
                     'count': 1
                 }
         
-        # Sort by priority, specificity, and rule count
-        generalized = sorted(
-            by_pattern.values(),
-            key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count'])
-        )
-        
-        # Take top rules up to max_policies
-        uniq = [item['rule'] for item in generalized[:max_policies]]
+        # Create groups to allow even generalization across principals/types.
+        # Grouping by the rule 'static' field (e.g., per-user) gives a fair
+        # distribution of rules when we must reduce the total count.
+        groups = {}
+        for item in by_pattern.values():
+            grp_key = item['rule'].get('static') or item['rule'].get('hints') or '#'
+            groups.setdefault(grp_key, []).append(item)
+
+        # Sort items within each group by priority, specificity, and count
+        for g in groups.values():
+            g.sort(key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count']))
+
+        # Order groups by the sum of their priorities so high-importance groups
+        # get selected earlier in the round-robin.
+        group_order = sorted(groups.keys(), key=lambda k: -sum(i['rule']['priority'] for i in groups[k]))
+
+        # Round-robin selection from groups until we hit max_policies
+        import collections
+        queue = collections.deque(group_order)
+        selected = []
+        while queue and len(selected) < max_policies:
+            key = queue.popleft()
+            bucket = groups.get(key)
+            if not bucket:
+                continue
+            item = bucket.pop(0)
+            selected.append(item['rule'])
+            # If bucket still has items, put it back to the end of the queue
+            if bucket:
+                queue.append(key)
+
+        uniq = selected
 
     write_sql(cfg, uniq, args.out)
     print(f'Wrote {len(uniq)} rules to {args.out}')
