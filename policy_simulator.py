@@ -202,6 +202,14 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
 
         # interns denied to some places (example rules)
         role = attrs.get('role', '')
+        # Get base priority from config, default to 1 if not found
+        base_priority = cfg.get('role_priorities', {}).get(role, 1)
+        
+        # Adjust priority by clearance using configured multiplier
+        clearance = int(attrs.get('clearance', '#0').replace('#', '') or 0)
+        multiplier = cfg.get('clearance_priority_multiplier', 2)
+        base_priority += clearance * multiplier
+
         if role == 'intern':
             # deny interns to building2 entirely and to high security floors
             for b in build_list:
@@ -218,7 +226,7 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         'filter': '',
                         'hints': 'subj',
                         'action': action,
-                        'priority': 1
+                        'priority': base_priority + cfg.get('security_restriction_bonus', 5)  # Add configured bonus for security restrictions
                     })
                 # deny interns from third-floor camera areas
                 topic = f"{b}/f3/#"
@@ -252,7 +260,7 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                             'filter': '',
                             'hints': 'subj',
                             'action': action,
-                            'priority': 5
+                            'priority': base_priority
                         })
 
         # Additionally, create an attribute-based generic rule for each capability
@@ -364,6 +372,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate ABAC policy SQL from base policy templates')
     parser.add_argument('--config', default='policy_settings.json', help='Path to policy_settings.json')
     parser.add_argument('--out', default='generated_policies.sql', help='Output SQL script path')
+    parser.add_argument('--max-policies', type=int, help='Maximum number of policies to generate (overrides config)')
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -381,6 +390,14 @@ def main():
             continue
         seen.add(key)
         uniq.append(r)
+
+    # Apply max policies limit
+    max_policies = args.max_policies or cfg.get('max_policies', 1000)
+    if max_policies > 0 and len(uniq) > max_policies:
+        print(f'Limiting output to {max_policies} policies (from {len(uniq)} total)')
+        # Sort by priority before truncating to keep highest priority rules
+        uniq.sort(key=lambda x: (-x.get('priority', 0), x.get('topic', '#')))
+        uniq = uniq[:max_policies]
 
     write_sql(cfg, uniq, args.out)
     print(f'Wrote {len(uniq)} rules to {args.out}')

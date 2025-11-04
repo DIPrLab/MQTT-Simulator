@@ -95,6 +95,16 @@
     "deny": 0.3,
     "filter": 0.0
   },
+  "role_priorities": {
+    "intern": 1,
+    "employee": 5,
+    "manager": 10,
+    "security": 15,
+    "public": 0
+  },
+  "clearance_priority_multiplier": 2,
+  "security_restriction_bonus": 5,
+  "max_policies": 1000,
   "base_policies": [
     {
       "topic_template": "{b}/{fl}/{r}/{dev}/#",
