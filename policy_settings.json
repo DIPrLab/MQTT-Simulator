@@ -120,6 +120,10 @@
     ]
   },
   "max_policies": 1000,
+  "generalization": {
+    "grouping_key": "static",   
+    "distribution_strategy": "proportional"  
+  },
   "base_policies": [
     {
       "topic_template": "{b}/{fl}/{r}/{dev}/#",

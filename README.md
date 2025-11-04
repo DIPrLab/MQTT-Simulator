@@ -92,6 +92,23 @@ Parameters:
 - `--config`: Path to policy settings JSON file
 - `--out`: Output SQL file path
 - `--max-policies`: Maximum number of policies to generate (overrides config)
+ - `--seed`: Optional deterministic random seed. If provided, the generator will be deterministic. The CLI seed overrides a `seed` value in the config file.
+
+Configuration notes (policy_settings.json):
+
+- `role_restrictions` (object): map role -> list of restriction definitions. Each restriction supports:
+   - `topic_template`: topic template with placeholders like `{b}` and `{fl}` (e.g. "{b}/f3/#")
+   - `building_suffix`: optional string to filter which buildings the restriction applies to (e.g. "2" to match building names ending with "2")
+   - `floor`: optional explicit floor value to substitute for `{fl}`
+   - `action`: `deny` or `grant` (used when creating the restriction rule)
+   - `priority`: numeric priority offset for the rule
+   - `priority_offset_config`: optional key name in the config whose numeric value will be added to the rule priority (e.g. `security_restriction_bonus`)
+
+- `generalization` (object): controls how many and which rules are kept when the generator hits the `max_policies` limit:
+   - `grouping_key`: `static` | `hints` | `device` — how to group rules before distributing slots
+   - `distribution_strategy`: `round_robin` | `proportional` | `priority_buckets` — how selected slots are allocated among groups
+
+These fields let you tune which role-based restrictions are created and how rules are generalized when truncation is required.
 
 ## Configuration Files
 

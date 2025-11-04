@@ -408,9 +408,18 @@ def main():
     parser.add_argument('--config', default='policy_settings.json', help='Path to policy_settings.json')
     parser.add_argument('--out', default='generated_policies.sql', help='Output SQL script path')
     parser.add_argument('--max-policies', type=int, help='Maximum number of policies to generate (overrides config)')
+    parser.add_argument('--seed', type=int, help='Optional deterministic random seed (overrides config)')
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    # deterministic seed support: CLI overrides config (cfg may include a 'seed' key)
+    seed = args.seed if args.seed is not None else cfg.get('seed')
+    if seed is not None:
+        try:
+            seed = int(seed)
+            random.seed(seed)
+        except Exception:
+            pass
     rules = expand_base_policies(cfg)
     # generate per-user and per-attribute dynamic rules
     user_rules = generate_user_attribute_rules(cfg)
@@ -490,36 +499,121 @@ def main():
                     'count': 1
                 }
         
-        # Create groups to allow even generalization across principals/types.
-        # Grouping by the rule 'static' field (e.g., per-user) gives a fair
-        # distribution of rules when we must reduce the total count.
+        # Generalization config
+        gen_cfg = cfg.get('generalization', {})
+        grouping_key = gen_cfg.get('grouping_key', 'static')  # static | hints | device
+        distribution = gen_cfg.get('distribution_strategy', 'proportional')
+
+        # Create groups based on configured grouping_key
         groups = {}
         for item in by_pattern.values():
-            grp_key = item['rule'].get('static') or item['rule'].get('hints') or '#'
-            groups.setdefault(grp_key, []).append(item)
+            rule = item['rule']
+            if grouping_key == 'static':
+                grp_key = rule.get('static') or rule.get('hints') or '#'
+            elif grouping_key == 'hints':
+                grp_key = rule.get('hints') or rule.get('static') or '#'
+            elif grouping_key == 'device':
+                # extract device part from topic if present
+                t = rule.get('topic', '')
+                parts = t.split('/')
+                if parts:
+                    # device is usually the 4th segment in expanded topics, otherwise use last
+                    grp_key = parts[3] if len(parts) > 3 else parts[-1]
+                else:
+                    grp_key = '#'
+            else:
+                grp_key = rule.get('static') or rule.get('hints') or '#'
+
+            groups.setdefault(str(grp_key), []).append(item)
 
         # Sort items within each group by priority, specificity, and count
         for g in groups.values():
             g.sort(key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count']))
 
-        # Order groups by the sum of their priorities so high-importance groups
-        # get selected earlier in the round-robin.
-        group_order = sorted(groups.keys(), key=lambda k: -sum(i['rule']['priority'] for i in groups[k]))
-
-        # Round-robin selection from groups until we hit max_policies
-        import collections
-        queue = collections.deque(group_order)
+        # Distribution strategies
         selected = []
-        while queue and len(selected) < max_policies:
-            key = queue.popleft()
-            bucket = groups.get(key)
-            if not bucket:
-                continue
-            item = bucket.pop(0)
-            selected.append(item['rule'])
-            # If bucket still has items, put it back to the end of the queue
-            if bucket:
-                queue.append(key)
+        import collections
+
+        if distribution == 'round_robin':
+            # Order groups by total priority so important groups are served earlier
+            group_order = sorted(groups.keys(), key=lambda k: -sum(i['rule']['priority'] for i in groups[k]))
+            queue = collections.deque(group_order)
+            while queue and len(selected) < max_policies:
+                key = queue.popleft()
+                bucket = groups.get(key)
+                if not bucket:
+                    continue
+                item = bucket.pop(0)
+                selected.append(item['rule'])
+                if bucket:
+                    queue.append(key)
+
+        elif distribution == 'proportional':
+            # Allocate slots proportional to group sizes (at least 1 if present)
+            total_count = sum(sum(i['count'] for i in groups[k]) for k in groups)
+            # fallback if total_count is 0
+            if total_count <= 0:
+                total_count = sum(len(groups[k]) for k in groups)
+            alloc = {}
+            for k in groups:
+                group_size = sum(i['count'] for i in groups[k])
+                share = 0
+                if total_count > 0:
+                    share = max(1, int(round((group_size / total_count) * max_policies)))
+                alloc[k] = share
+
+            # select per group based on allocated share
+            for k, share in alloc.items():
+                bucket = groups.get(k, [])
+                take = min(len(bucket), share)
+                for _ in range(take):
+                    if len(selected) >= max_policies:
+                        break
+                    selected.append(bucket.pop(0)['rule'])
+
+            # if not enough selected, fill by highest priority remaining
+            remaining = []
+            for k in groups:
+                remaining.extend(groups[k])
+            remaining.sort(key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count']))
+            i = 0
+            while len(selected) < max_policies and i < len(remaining):
+                selected.append(remaining[i]['rule'])
+                i += 1
+
+        elif distribution == 'priority_buckets':
+            # Select items from highest priority down, but try to distribute across groups within a priority
+            # Build priority -> group -> items mapping
+            prio_map = {}
+            for k, bucket in groups.items():
+                for it in bucket:
+                    p = it['rule'].get('priority', 0)
+                    prio_map.setdefault(p, {}).setdefault(k, []).append(it)
+
+            for p in sorted(prio_map.keys(), reverse=True):
+                # within this priority, round-robin across groups
+                grp_keys = list(prio_map[p].keys())
+                q = collections.deque(grp_keys)
+                while q and len(selected) < max_policies:
+                    gk = q.popleft()
+                    bucket = prio_map[p].get(gk)
+                    if not bucket:
+                        continue
+                    it = bucket.pop(0)
+                    selected.append(it['rule'])
+                    if bucket:
+                        q.append(gk)
+                if len(selected) >= max_policies:
+                    break
+
+        else:
+            # default fallback: previous behavior - take highest priority across all
+            all_items = []
+            for bucket in groups.values():
+                all_items.extend(bucket)
+            all_items.sort(key=lambda x: (-x['rule']['priority'], -x['specificity'], -x['count']))
+            for it in all_items[:max_policies]:
+                selected.append(it['rule'])
 
         uniq = selected
 
