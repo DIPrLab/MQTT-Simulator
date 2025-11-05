@@ -130,11 +130,9 @@ def expand_base_policies(cfg: dict) -> List[dict]:
             try:
                 topic = p['topic_template'].format_map(mapping_filled)
             except Exception:
-                # if formatting fails (malformed template), fall back to literal
                 topic = p['topic_template']
             # normalize double slashes
             topic = topic.replace('//', '/')
-            # strip trailing slashes
             topic = topic.strip('/')
             if topic == '':
                 topic = '#'
@@ -190,7 +188,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         return vals if vals else ['']
 
     # Get device capability mapping from config (attribute -> device types)
-    # Require explicit mapping in config; default to empty mapping if absent
     device_map = cfg.get('device_capability_map', {})
 
     # build userid -> username map
@@ -264,7 +261,7 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         vals = ['']
                     dim_value_lists.append(vals)
 
-                # iterate combinations (or one empty combo if none)
+                # iterate combinations
                 if not dim_value_lists:
                     combos = [()]
                 else:
@@ -285,9 +282,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                             for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                 mapping[alias] = val
                     
-                    # No implicit device alias fallbacks; alias_map must provide required aliases
-
-                    # optional building filter
                     bval = mapping.get('b', '')
                     if 'building_suffix' in rdef and not str(bval).endswith(rdef['building_suffix']):
                         continue
@@ -340,7 +334,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         for dname, aliases in cfg_alias_map.items():
                             if dname in mapping:
                                 val = mapping[dname]
-                                # Support both single alias string and list of aliases
                                 for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                     mapping[alias] = val
                         
@@ -350,7 +343,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                             mapping_filled = defaultdict(lambda: '+', mapping)
                             topic = "{b}/{fl}/{r}/{dev}/#".format_map(mapping_filled)
                         except Exception:
-                            # fall back to manual join
                             parts = [mapping.get('b', ''), mapping.get('fl', ''), mapping.get('r', ''), dev]
                             topic = '/'.join([p for p in parts if p]) + '/#'
                         topic = topic.replace('//', '/').strip('/')
@@ -384,7 +376,7 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         combos = [()]
                     
                     for combo in combos:
-                        # Build mapping from dimension name -> value
+                        # Build mapping from dimension name
                         mapping = {}
                         for k, v in zip(spatial_keys, combo):
                             mapping[k] = v
@@ -394,7 +386,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         for dname, aliases in cfg_alias_map.items():
                             if dname in mapping:
                                 val = mapping[dname]
-                                # Support both single alias string and list of aliases
                                 for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                     mapping[alias] = val
                                     
@@ -513,7 +504,6 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    # deterministic seed support: CLI overrides config
     seed = args.seed if args.seed is not None else cfg.get('seed')
     if seed is not None:
         try:
@@ -592,7 +582,6 @@ def main():
             # Extract pattern components
             parts = topic.split('/')
             if len(parts) >= 4:
-                # Create more general patterns based on specificity needed
                 building = parts[0]
                 floor = parts[1]
                 
@@ -653,7 +642,7 @@ def main():
                 if key not in by_pattern:
                     by_pattern[key] = {
                         'rule': rule,
-                        'specificity': 4,  # Higher specificity for unique patterns
+                        'specificity': 4,
                         'count': 1,
                         'action_counts': { (action or 'deny').lower(): 1 }
                     }
@@ -690,7 +679,6 @@ def main():
                 t = rule.get('topic', '')
                 parts = t.split('/')
                 if parts:
-                    # device is usually the 4th segment in expanded topics, otherwise use last
                     grp_key = parts[3] if len(parts) > 3 else parts[-1]
                 else:
                     grp_key = '#'
@@ -756,7 +744,6 @@ def main():
 
         elif distribution == 'priority_buckets':
             # Select items from highest priority down, but try to distribute across groups within a priority
-            # Build priority -> group -> items mapping
             prio_map = {}
             for k, bucket in groups.items():
                 for it in bucket:
@@ -780,7 +767,6 @@ def main():
                     break
 
         else:
-            # default fallback: previous behavior - take highest priority across all
             all_items = []
             for bucket in groups.values():
                 all_items.extend(bucket)
@@ -795,7 +781,6 @@ def main():
         # First check if we need to reduce via generalization
         if len(uniq) > max_policies:
             print(f'Generalizing to limit output to {max_policies} policies (from {len(uniq)} total)')
-            # Previous generalization logic remains...
         else:
             # Fill up to max_policies using variants
             existing_keys = set((r.get('topic'), r.get('static'), r.get('dynamic'), 
