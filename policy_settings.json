@@ -90,6 +90,13 @@
     "rooms": ["1","2","3","4","5"],
     "device_types": ["cam","proximity","thermostat","tstat"]
   },
+  "alias_map": {
+    "buildings": ["b"],
+    "floors": ["fl"],
+    "rooms": ["r"],
+    "device_types": ["dev"],
+    "devices": ["dev"]
+  },
   "action_probabilities": {
     "grant": 0.7,
     "deny": 0.3,

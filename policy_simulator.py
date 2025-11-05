@@ -2,6 +2,7 @@ import json
 import argparse
 import itertools
 import random
+import string
 from typing import List, Dict
 
 def load_config(path: str) -> dict:
@@ -14,7 +15,6 @@ def escape_sql(s: str) -> str:
     return s.replace("'", "''")
 
 def format_value(val) -> str:
-    # Wrap and escape strings for SQL literal
     if val is None:
         return "''"
     return "'{}'".format(escape_sql(str(val)))
@@ -52,14 +52,6 @@ def expand_base_policies(cfg: dict) -> List[dict]:
     for p in bp:
         # determine dimensions to expand
         devices = p.get('devices', [])
-        # if devices empty, use placeholder None to keep template intact
-        dev_list = devices if devices else [None]
-
-        build_list = ex.get('buildings', [""])
-        floor_list = ex.get('floors', [""])
-        room_list = ex.get('rooms', [""])
-
-        # helper: choose action will be resolved at module-level
 
         # if expand_on empty: emit template as-is
         if not p.get('expand_on'):
@@ -105,10 +97,41 @@ def expand_base_policies(cfg: dict) -> List[dict]:
                 })
             continue
 
-        # Expand across specified dimensions
-        for b, fl, r, dev in itertools.product(build_list, floor_list, room_list, dev_list):
-            # create mapping
-            mapping = {'b': b, 'fl': fl, 'r': r, 'dev': dev or ''}
+        # Expand across the configured dimensions named in `expand_on`.
+        # This supports arbitrary expansion dimension names in the config.
+        dims = p.get('expand_on', [])
+        # Build list of value-lists for each dimension; fall back to [''] so
+        # templates that don't use a dimension still format correctly.
+        dim_value_lists = []
+        for d in dims:
+            if d in ('devices', 'device_types'):
+                vals = p.get('devices') or ex.get('device_types', []) or []
+            else:
+                vals = ex.get(d, []) or []
+            # if empty, keep an empty-string so product still yields one combo
+            if not vals:
+                vals = ['']
+            dim_value_lists.append(vals)
+
+        # iterate combinations for the requested dimensions
+        for combo in itertools.product(*dim_value_lists):
+            # build mapping from dimension name -> value and also provide
+            # short aliases for backward compatibility (b, fl, r, dev)
+            mapping = {}
+            for name, val in zip(dims, combo):
+                mapping[name] = val
+            # aliases: allow overriding via config.alias_map; default provides
+            # short names for backward compatibility (e.g. {b} -> {buildings}).
+            # load alias map from config (expansion key -> alias or list of aliases)
+            # NOTE: alias mapping is now expected to be defined in policy_settings.json
+            cfg_alias_map = cfg.get('alias_map', {})
+            # cfg_alias_map maps expansion key -> list of alias names
+            for dname, aliases in cfg_alias_map.items():
+                if dname in mapping:
+                    for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
+                        mapping[alias] = mapping[dname]
+            # ensure dev alias exists
+            mapping.setdefault('dev', '')
             try:
                 topic = p['topic_template'].format(**mapping)
             except Exception:
@@ -164,9 +187,12 @@ def expand_base_policies(cfg: dict) -> List[dict]:
 
 def generate_user_attribute_rules(cfg: dict) -> List[dict]:
     ex = cfg.get('expansions', {})
-    build_list = ex.get('buildings', [""])
-    floor_list = ex.get('floors', [""])
-    room_list = ex.get('rooms', [""])
+    # Helper: get expansion values for an expansion key; return [''] when empty
+    def _vals(key, override=None):
+        if override is not None:
+            return [override]
+        vals = ex.get(key) or []
+        return vals if vals else ['']
 
     # device mapping: attribute -> device types
     device_map = {
@@ -200,15 +226,17 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         multiplier = cfg.get('clearance_priority_multiplier', 2)
         base_priority += clearance * multiplier
 
-        # Apply role-based restrictions from config if provided. This makes restrictions
-        # dynamic per-role instead of hardcoding behavior for 'intern'. The config key
-        # `role_restrictions` should map a role to a list of restriction definitions.
-        # Each restriction supports a `topic_template` with {b} and {fl}, an optional
-        # `building_suffix` filter, an `action`, and numeric `priority` or
-        # `priority_offset_config` which references a numeric value in the config.
+        # Apply role-based restrictions (config-driven). Templates may use
+        # placeholders like {b},{fl},{r},{dev} or full names; detect fields and
+        # expand over whichever expansion lists are present in the config.
         role_restrictions = cfg.get('role_restrictions', {})
         restrictions = role_restrictions.get(role, [])
         if restrictions:
+            fmt = string.Formatter()
+            # load alias map from config (expansion key -> alias or list of aliases)
+            # load alias map from config (expansion key -> alias or list of aliases)
+            # NOTE: alias mapping is expected to be provided in policy_settings.json
+            cfg_alias_map = cfg.get('alias_map', {})
             for rdef in restrictions:
                 t_template = rdef.get('topic_template', '{b}/#')
                 action_name = rdef.get('action', 'deny')
@@ -220,17 +248,63 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                     except Exception:
                         pass
 
-                for b in build_list:
-                    if not b:
-                        continue
-                    # optional building filter (e.g. endswith '2')
-                    if 'building_suffix' in rdef and not b.endswith(rdef['building_suffix']):
+                # find field names used in the template
+                fields = [fname for _, fname, _, _ in fmt.parse(t_template) if fname]
+
+                # build the list of expansion keys we should iterate
+                expand_keys = []
+                for ex_key, aliases in cfg_alias_map.items():
+                    # aliases may be a single string or a list/tuple
+                    aset = aliases if isinstance(aliases, (list, tuple)) else [aliases]
+                    # include ex_key if either its canonical name or any alias appears in template fields
+                    if ex_key in fields or any(a in fields for a in aset):
+                        expand_keys.append(ex_key)
+
+                # if an explicit floor is provided in the restriction, prefer it
+                floor_override = rdef.get('floor')
+
+                # build value lists for each expand key
+                dim_value_lists = []
+                for key in expand_keys:
+                    if key == 'floors' and floor_override is not None:
+                        vals = [floor_override]
+                    elif key in ('devices', 'device_types'):
+                        vals = rdef.get('devices') or ex.get('device_types', []) or []
+                    else:
+                        vals = ex.get(key, []) or []
+                    if not vals:
+                        vals = ['']
+                    dim_value_lists.append(vals)
+
+                # iterate combinations (or one empty combo if none)
+                if not dim_value_lists:
+                    combos = [()]
+                else:
+                    combos = itertools.product(*dim_value_lists)
+
+                for combo in combos:
+                    mapping = {}
+                    for k, v in zip(expand_keys, combo):
+                        mapping[k] = v
+                    # provide aliases for templates using short names
+                    if 'buildings' in mapping:
+                        mapping['b'] = mapping.get('buildings', '')
+                    if 'floors' in mapping:
+                        mapping['fl'] = mapping.get('floors', '')
+                    if 'rooms' in mapping:
+                        mapping['r'] = mapping.get('rooms', '')
+                    if 'device_types' in mapping:
+                        mapping['dev'] = mapping.get('device_types', '')
+                    if 'devices' in mapping and 'dev' not in mapping:
+                        mapping['dev'] = mapping.get('devices', '')
+
+                    # optional building filter
+                    bval = mapping.get('b', '')
+                    if 'building_suffix' in rdef and not str(bval).endswith(rdef['building_suffix']):
                         continue
 
-                    # allow an explicit floor in the rule definition, otherwise leave placeholder
-                    fl_spec = rdef.get('floor', '')
                     try:
-                        topic = t_template.format(b=b, fl=fl_spec)
+                        topic = t_template.format(**mapping)
                     except Exception:
                         topic = t_template
                     topic = topic.replace('//', '/').strip('/')
@@ -250,10 +324,11 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         else:
             # Backwards-compatible fallback: original intern-specific rules if no config provided
             if role == 'intern':
-                for b in build_list:
+                buildings = _vals('buildings')
+                for b in buildings:
                     if not b:
                         continue
-                    if b.endswith('2'):
+                    if str(b).endswith('2'):
                         topic = f"{b}/#"
                         action = choose_action({'action': 'deny'}, cfg)
                         rules.append({
@@ -282,10 +357,38 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
             # match ?true attributes (capabilities)
             if isinstance(aval, str) and aval.startswith('?') and 'true' in aval:
                 devs = device_map.get(aname, [])
+                # determine which spatial dims exist in the config
+                spatial_keys = [k for k in ('buildings', 'floors', 'rooms') if ex.get(k)]
+                if not spatial_keys:
+                    spatial_keys = []
                 for dev in devs:
-                    for b, fl, r in itertools.product(build_list, floor_list, room_list):
-                        mapping = {'b': b, 'fl': fl, 'r': r, 'dev': dev}
-                        topic = f"{b}/{fl}/{r}/{dev}/#".replace('//', '/').strip('/')
+                    # build dim value lists
+                    dim_value_lists = []
+                    for key in spatial_keys:
+                        dim_value_lists.append(_vals(key))
+                    if dim_value_lists:
+                        combos = itertools.product(*dim_value_lists)
+                    else:
+                        combos = [()]
+                    for combo in combos:
+                        mapping = {}
+                        for k, v in zip(spatial_keys, combo):
+                            mapping[k] = v
+                        # aliases
+                        if 'buildings' in mapping:
+                            mapping['b'] = mapping.get('buildings', '')
+                        if 'floors' in mapping:
+                            mapping['fl'] = mapping.get('floors', '')
+                        if 'rooms' in mapping:
+                            mapping['r'] = mapping.get('rooms', '')
+                        mapping['dev'] = dev
+                        try:
+                            topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
+                        except Exception:
+                            # fall back to manual join
+                            parts = [mapping.get('b', ''), mapping.get('fl', ''), mapping.get('r', ''), dev]
+                            topic = '/'.join([p for p in parts if p]) + '/#'
+                        topic = topic.replace('//', '/').strip('/')
                         if topic == '':
                             topic = '#'
                         action = choose_action({'action': 'grant'}, cfg)
@@ -303,9 +406,32 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         for aname, aval in attrs.items():
             if isinstance(aval, str) and aval.startswith('?') and 'true' in aval:
                 devs = device_map.get(aname, [])
+                spatial_keys = [k for k in ('buildings', 'floors', 'rooms') if ex.get(k)]
                 for dev in devs:
-                    for b, fl, r in itertools.product(build_list, floor_list, room_list):
-                        topic = f"{b}/{fl}/{r}/{dev}/#".replace('//', '/').strip('/')
+                    dim_value_lists = []
+                    for key in spatial_keys:
+                        dim_value_lists.append(_vals(key))
+                    if dim_value_lists:
+                        combos = itertools.product(*dim_value_lists)
+                    else:
+                        combos = [()]
+                    for combo in combos:
+                        mapping = {}
+                        for k, v in zip(spatial_keys, combo):
+                            mapping[k] = v
+                        if 'buildings' in mapping:
+                            mapping['b'] = mapping.get('buildings', '')
+                        if 'floors' in mapping:
+                            mapping['fl'] = mapping.get('floors', '')
+                        if 'rooms' in mapping:
+                            mapping['r'] = mapping.get('rooms', '')
+                        mapping['dev'] = dev
+                        try:
+                            topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
+                        except Exception:
+                            parts = [mapping.get('b', ''), mapping.get('fl', ''), mapping.get('r', ''), dev]
+                            topic = '/'.join([p for p in parts if p]) + '/#'
+                        topic = topic.replace('//', '/').strip('/')
                         if topic == '':
                             topic = '#'
                         action = choose_action({'action': 'grant'}, cfg)
@@ -425,15 +551,35 @@ def main():
     user_rules = generate_user_attribute_rules(cfg)
     rules.extend(user_rules)
 
-    # deduplicate similar rules (topic + static + dynamic + action + priority)
-    seen = set()
-    uniq = []
+    # deduplicate similar rules and resolve conflicting actions.
+    # Group by topic + static + dynamic + priority (ignore action) and resolve
+    # action conflicts using precedence: deny > filter > grant. When multiple
+    # rules map to the same key we keep the rule with the higher-precedence
+    # action. This prevents contradictory grant/deny pairs for the same match.
+    grouped = {}
+    action_precedence = {'deny': 3, 'filter': 2, 'grant': 1}
     for r in rules:
-        key = (r['topic'], r['static'], r['dynamic'], r['action'], r['priority'])
-        if key in seen:
+        key = (r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'))
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = r
             continue
-        seen.add(key)
-        uniq.append(r)
+
+        # If priorities differ (shouldn't for same key), prefer the higher numeric priority
+        if r.get('priority', 0) != existing.get('priority', 0):
+            if r.get('priority', 0) > existing.get('priority', 0):
+                grouped[key] = r
+            continue
+
+        # Same priority: choose by action precedence
+        act_existing = (existing.get('action') or 'deny').lower()
+        act_new = (r.get('action') or 'deny').lower()
+        pr_existing = action_precedence.get(act_existing, 1)
+        pr_new = action_precedence.get(act_new, 1)
+        if pr_new > pr_existing:
+            grouped[key] = r
+
+    uniq = list(grouped.values())
 
     # Apply max policies limit with generalization
     max_policies = args.max_policies or cfg.get('max_policies', 1000)
@@ -473,7 +619,9 @@ def main():
                 
                 # Use the most specific pattern that helps us meet our limit
                 for pattern, specificity in patterns:
-                    key = (pattern, static, action)
+                    # use priority in the key, but not action, so we can resolve
+                    # conflicting actions for the same generalized pattern
+                    key = (pattern, static, priority)
                     if key not in by_pattern:
                         by_pattern[key] = {
                             'rule': {
@@ -489,15 +637,27 @@ def main():
                             'count': 1
                         }
                     else:
+                        # increment count and resolve action conflicts by precedence
                         by_pattern[key]['count'] += 1
+                        existing_action = by_pattern[key]['rule'].get('action', 'deny')
+                        # action_precedence defined earlier (deny>filter>grant)
+                        if action_precedence.get(action.lower(), 1) > action_precedence.get(existing_action.lower(), 1):
+                            by_pattern[key]['rule']['action'] = action
             else:
-                # Keep non-standard patterns as-is
-                key = (topic, static, action)
-                by_pattern[key] = {
-                    'rule': rule,
-                    'specificity': 4,  # Higher specificity for unique patterns
-                    'count': 1
-                }
+                # Keep non-standard patterns as-is; use priority in key and
+                # resolve action conflicts if multiple appear for same key
+                key = (topic, static, priority)
+                if key not in by_pattern:
+                    by_pattern[key] = {
+                        'rule': rule,
+                        'specificity': 4,  # Higher specificity for unique patterns
+                        'count': 1
+                    }
+                else:
+                    by_pattern[key]['count'] += 1
+                    existing_action = by_pattern[key]['rule'].get('action', 'deny')
+                    if action_precedence.get(action.lower(), 1) > action_precedence.get(existing_action.lower(), 1):
+                        by_pattern[key]['rule']['action'] = action
         
         # Generalization config
         gen_cfg = cfg.get('generalization', {})
