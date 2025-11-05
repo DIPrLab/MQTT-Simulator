@@ -102,6 +102,11 @@
     "deny": 0.5,
     "filter": 0.0
   },
+  "device_capability_map": {
+    "video": ["cam"],
+    "alarm": ["proximity"],
+    "facilities": ["tstat", "thermostat"]
+  },
   "role_priorities": {
     "intern": 1,
     "employee": 5,

@@ -98,10 +98,8 @@ def expand_base_policies(cfg: dict) -> List[dict]:
             continue
 
         # Expand across the configured dimensions named in `expand_on`.
-        # This supports arbitrary expansion dimension names in the config.
         dims = p.get('expand_on', [])
-        # Build list of value-lists for each dimension; fall back to [''] so
-        # templates that don't use a dimension still format correctly.
+        # Build list of value-lists for each dimension
         dim_value_lists = []
         for d in dims:
             if d in ('devices', 'device_types'):
@@ -116,14 +114,9 @@ def expand_base_policies(cfg: dict) -> List[dict]:
         # iterate combinations for the requested dimensions
         for combo in itertools.product(*dim_value_lists):
             # build mapping from dimension name -> value and also provide
-            # short aliases for backward compatibility (b, fl, r, dev)
             mapping = {}
             for name, val in zip(dims, combo):
                 mapping[name] = val
-            # aliases: allow overriding via config.alias_map; default provides
-            # short names for backward compatibility (e.g. {b} -> {buildings}).
-            # load alias map from config (expansion key -> alias or list of aliases)
-            # NOTE: alias mapping is now expected to be defined in policy_settings.json
             cfg_alias_map = cfg.get('alias_map', {})
             # cfg_alias_map maps expansion key -> list of alias names
             for dname, aliases in cfg_alias_map.items():
@@ -187,19 +180,20 @@ def expand_base_policies(cfg: dict) -> List[dict]:
 
 def generate_user_attribute_rules(cfg: dict) -> List[dict]:
     ex = cfg.get('expansions', {})
-    # Helper: get expansion values for an expansion key; return [''] when empty
+    # Helper: get expansion values for an expansion key
     def _vals(key, override=None):
         if override is not None:
             return [override]
         vals = ex.get(key) or []
         return vals if vals else ['']
 
-    # device mapping: attribute -> device types
-    device_map = {
+    # Get device capability mapping from config (attribute -> device types)
+    device_map = cfg.get('device_capability_map', {
+        # Default fallback for backward compatibility
         'video': ['cam'],
         'alarm': ['proximity'],
         'facilities': ['tstat', 'thermostat']
-    }
+    })
 
     # build userid -> username map
     uid_to_user = {}
@@ -226,16 +220,12 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         multiplier = cfg.get('clearance_priority_multiplier', 2)
         base_priority += clearance * multiplier
 
-        # Apply role-based restrictions (config-driven). Templates may use
-        # placeholders like {b},{fl},{r},{dev} or full names; detect fields and
-        # expand over whichever expansion lists are present in the config.
+        # Apply role-based restrictions
         role_restrictions = cfg.get('role_restrictions', {})
         restrictions = role_restrictions.get(role, [])
         if restrictions:
             fmt = string.Formatter()
             # load alias map from config (expansion key -> alias or list of aliases)
-            # load alias map from config (expansion key -> alias or list of aliases)
-            # NOTE: alias mapping is expected to be provided in policy_settings.json
             cfg_alias_map = cfg.get('alias_map', {})
             for rdef in restrictions:
                 t_template = rdef.get('topic_template', '{b}/#')
@@ -283,20 +273,25 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                     combos = itertools.product(*dim_value_lists)
 
                 for combo in combos:
+                    # Build mapping from dimension name -> value
                     mapping = {}
                     for k, v in zip(expand_keys, combo):
                         mapping[k] = v
-                    # provide aliases for templates using short names
-                    if 'buildings' in mapping:
-                        mapping['b'] = mapping.get('buildings', '')
-                    if 'floors' in mapping:
-                        mapping['fl'] = mapping.get('floors', '')
-                    if 'rooms' in mapping:
-                        mapping['r'] = mapping.get('rooms', '')
-                    if 'device_types' in mapping:
-                        mapping['dev'] = mapping.get('device_types', '')
+                            
+                    # Apply aliases from config for each expansion key
+                    cfg_alias_map = cfg.get('alias_map', {})
+                    for dname, aliases in cfg_alias_map.items():
+                        if dname in mapping:
+                            val = mapping[dname]
+                            # Support both single alias string and list of aliases
+                            for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
+                                mapping[alias] = val
+                                    
+                    # Ensure device aliases exist for backward compatibility
+                    if 'device_types' in mapping and 'dev' not in mapping:
+                        mapping['dev'] = mapping['device_types']
                     if 'devices' in mapping and 'dev' not in mapping:
-                        mapping['dev'] = mapping.get('devices', '')
+                        mapping['dev'] = mapping['devices']
 
                     # optional building filter
                     bval = mapping.get('b', '')
@@ -357,8 +352,8 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
             # match ?true attributes (capabilities)
             if isinstance(aval, str) and aval.startswith('?') and 'true' in aval:
                 devs = device_map.get(aname, [])
-                # determine which spatial dims exist in the config
-                spatial_keys = [k for k in ('buildings', 'floors', 'rooms') if ex.get(k)]
+                # Get expansion keys that have values in the config, excluding device-related keys
+                spatial_keys = [k for k in ex.keys() if k not in ('devices', 'device_types')]
                 if not spatial_keys:
                     spatial_keys = []
                 for dev in devs:
@@ -374,13 +369,16 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         mapping = {}
                         for k, v in zip(spatial_keys, combo):
                             mapping[k] = v
-                        # aliases
-                        if 'buildings' in mapping:
-                            mapping['b'] = mapping.get('buildings', '')
-                        if 'floors' in mapping:
-                            mapping['fl'] = mapping.get('floors', '')
-                        if 'rooms' in mapping:
-                            mapping['r'] = mapping.get('rooms', '')
+                        # Apply aliases from config for each expansion key
+                        cfg_alias_map = cfg.get('alias_map', {})
+                        for dname, aliases in cfg_alias_map.items():
+                            if dname in mapping:
+                                val = mapping[dname]
+                                # Support both single alias string and list of aliases
+                                for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
+                                    mapping[alias] = val
+                        
+                        # Ensure dev alias exists for backward compatibility
                         mapping['dev'] = dev
                         try:
                             topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
@@ -402,11 +400,13 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                             'priority': base_priority
                         })
 
-        # Additionally, create an attribute-based generic rule for each capability
+        # Create an attribute-based generic rule for each capability
         for aname, aval in attrs.items():
             if isinstance(aval, str) and aval.startswith('?') and 'true' in aval:
                 devs = device_map.get(aname, [])
-                spatial_keys = [k for k in ('buildings', 'floors', 'rooms') if ex.get(k)]
+                # Get expansion keys that have values in the config
+                spatial_keys = [k for k in ex.keys() if k not in ('devices', 'device_types')]
+                
                 for dev in devs:
                     dim_value_lists = []
                     for key in spatial_keys:
@@ -415,16 +415,23 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         combos = itertools.product(*dim_value_lists)
                     else:
                         combos = [()]
+                    
                     for combo in combos:
+                        # Build mapping from dimension name -> value
                         mapping = {}
                         for k, v in zip(spatial_keys, combo):
                             mapping[k] = v
-                        if 'buildings' in mapping:
-                            mapping['b'] = mapping.get('buildings', '')
-                        if 'floors' in mapping:
-                            mapping['fl'] = mapping.get('floors', '')
-                        if 'rooms' in mapping:
-                            mapping['r'] = mapping.get('rooms', '')
+                            
+                        # Apply aliases from config for each expansion key
+                        cfg_alias_map = cfg.get('alias_map', {})
+                        for dname, aliases in cfg_alias_map.items():
+                            if dname in mapping:
+                                val = mapping[dname]
+                                # Support both single alias string and list of aliases
+                                for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
+                                    mapping[alias] = val
+                                    
+                        # Ensure dev alias exists
                         mapping['dev'] = dev
                         try:
                             topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
@@ -538,7 +545,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    # deterministic seed support: CLI overrides config (cfg may include a 'seed' key)
+    # deterministic seed support: CLI overrides config
     seed = args.seed if args.seed is not None else cfg.get('seed')
     if seed is not None:
         try:
@@ -550,13 +557,7 @@ def main():
     # generate per-user and per-attribute dynamic rules
     user_rules = generate_user_attribute_rules(cfg)
     rules.extend(user_rules)
-
-    # deduplicate similar rules and resolve conflicting actions.
-    # Group by topic + static + dynamic + priority (ignore action) and resolve
-    # action conflicts using precedence: deny > filter > grant. When multiple
-    # rules map to the same key we keep the rule with the higher-precedence
-    # action. This prevents contradictory grant/deny pairs for the same match.
-    # helper: pick among tied actions using configured action_probabilities
+    # Deduplicate rules by (topic, static, dynamic, priority), resolving action conflicts by configured weights.
     def _pick_action_weighted(candidates):
         probs = cfg.get('action_probabilities', {}) or {}
         # build weights in same order as candidates
@@ -571,11 +572,9 @@ def main():
             total += w
         if total <= 0:
             return random.choice(candidates)
-        # normalize not necessary for random.choices
         return random.choices(candidates, weights=weights, k=1)[0]
 
     # Aggregate rules by (topic, static, dynamic, priority) and count actions.
-    # Resolve conflicts by majority vote of actions; on ties prefer 'grant'
     grouped = {}
     for r in rules:
         key = (r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'))
@@ -594,8 +593,6 @@ def main():
         counts[act] = counts.get(act, 0) + 1
 
         # keep the representative rule as the one with highest numeric priority
-        # (should be same) or the one that is more specific (not tracked), so keep first
-        # unless the new rule has higher priority
         if r.get('priority', 0) > g['rep'].get('priority', 0):
             g['rep'] = r.copy()
 
@@ -604,7 +601,6 @@ def main():
     for key, data in grouped.items():
         rep = data['rep']
         counts = data['action_counts']
-        # choose action by max count; if there's a tie, pick one at random
         max_count = max(counts.values())
         candidates = [a for a, c in counts.items() if c == max_count]
         rep['action'] = _pick_action_weighted(candidates) if candidates else (rep.get('action') or 'deny')
@@ -625,7 +621,7 @@ def main():
             
             # Extract pattern components
             parts = topic.split('/')
-            if len(parts) >= 4:  # building/floor/room/device pattern
+            if len(parts) >= 4:
                 # Create more general patterns based on specificity needed
                 building = parts[0]
                 floor = parts[1]
@@ -640,16 +636,15 @@ def main():
                 
                 # Generate increasingly general patterns
                 patterns = [
-                    (f"{building}/{floor}/+/{device_part}{suffix}", 3),  # floor level
-                    (f"{building}/+/+/{device_part}{suffix}", 2),        # building level
-                    (f"+/+/+/{device_part}{suffix}", 1),                # device type level
-                    ("#", 0)                                           # catch-all
+                    (f"{building}/{floor}/+/{device_part}{suffix}", 3),
+                    (f"{building}/+/+/{device_part}{suffix}", 2),
+                    (f"+/+/+/{device_part}{suffix}", 1),
+                    ("#", 0)
                 ]
                 
                 # Use the most specific pattern that helps us meet our limit
                 for pattern, specificity in patterns:
                     # use priority in the key, but not action, so we can resolve
-                    # conflicting actions for the same generalized pattern
                     key = (pattern, static, priority)
                     if key not in by_pattern:
                         by_pattern[key] = {
@@ -683,7 +678,6 @@ def main():
                                 'priority': priority
                             }
             else:
-                # Keep non-standard patterns as-is; use priority in key and
                 # resolve action conflicts if multiple appear for same key
                 key = (topic, static, priority)
                 if key not in by_pattern:
@@ -703,11 +697,10 @@ def main():
         
         # Generalization config
         gen_cfg = cfg.get('generalization', {})
-        grouping_key = gen_cfg.get('grouping_key', 'static')  # static | hints | device
+        grouping_key = gen_cfg.get('grouping_key', 'static')
         distribution = gen_cfg.get('distribution_strategy', 'proportional')
 
         # Create groups based on configured grouping_key
-        # finalize generalized pattern actions by majority; break ties randomly
         for _k, _entry in list(by_pattern.items()):
                 ac = _entry.get('action_counts', {})
                 if ac:
@@ -828,10 +821,7 @@ def main():
         uniq = selected
 
     # If after deduplication/generalization we still have fewer than the
-    # requested max_policies, refill from the original grouped entries by
-    # restoring per-action variants that were collapsed earlier (e.g. both
-    # grant and deny for the same matching key). This preserves separate
-    # grant/deny logic while attempting to reach the requested output size.
+    # requested max_policies, refill from the original grouped entries
     max_policies = args.max_policies or cfg.get('max_policies', 1000)
     if max_policies > 0 and len(uniq) < max_policies:
         need = max_policies - len(uniq)
