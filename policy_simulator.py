@@ -556,30 +556,59 @@ def main():
     # action conflicts using precedence: deny > filter > grant. When multiple
     # rules map to the same key we keep the rule with the higher-precedence
     # action. This prevents contradictory grant/deny pairs for the same match.
+    # helper: pick among tied actions using configured action_probabilities
+    def _pick_action_weighted(candidates):
+        probs = cfg.get('action_probabilities', {}) or {}
+        # build weights in same order as candidates
+        weights = []
+        total = 0.0
+        for a in candidates:
+            try:
+                w = float(probs.get(a, 0) or 0)
+            except Exception:
+                w = 0.0
+            weights.append(w)
+            total += w
+        if total <= 0:
+            return random.choice(candidates)
+        # normalize not necessary for random.choices
+        return random.choices(candidates, weights=weights, k=1)[0]
+
+    # Aggregate rules by (topic, static, dynamic, priority) and count actions.
+    # Resolve conflicts by majority vote of actions; on ties prefer 'grant'
     grouped = {}
-    action_precedence = {'deny': 3, 'filter': 2, 'grant': 1}
     for r in rules:
         key = (r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'))
-        existing = grouped.get(key)
-        if existing is None:
-            grouped[key] = r
+        g = grouped.get(key)
+        if g is None:
+            # store representative rule and action counts
+            grouped[key] = {
+                'rep': r.copy(),
+                'action_counts': { (r.get('action') or 'deny').lower(): 1 }
+            }
             continue
 
-        # If priorities differ (shouldn't for same key), prefer the higher numeric priority
-        if r.get('priority', 0) != existing.get('priority', 0):
-            if r.get('priority', 0) > existing.get('priority', 0):
-                grouped[key] = r
-            continue
+        # increment action count
+        act = (r.get('action') or 'deny').lower()
+        counts = g['action_counts']
+        counts[act] = counts.get(act, 0) + 1
 
-        # Same priority: choose by action precedence
-        act_existing = (existing.get('action') or 'deny').lower()
-        act_new = (r.get('action') or 'deny').lower()
-        pr_existing = action_precedence.get(act_existing, 1)
-        pr_new = action_precedence.get(act_new, 1)
-        if pr_new > pr_existing:
-            grouped[key] = r
+        # keep the representative rule as the one with highest numeric priority
+        # (should be same) or the one that is more specific (not tracked), so keep first
+        # unless the new rule has higher priority
+        if r.get('priority', 0) > g['rep'].get('priority', 0):
+            g['rep'] = r.copy()
 
-    uniq = list(grouped.values())
+    # finalize unique rules by selecting the action with the highest count; on tie prefer grant
+    uniq = []
+    for key, data in grouped.items():
+        rep = data['rep']
+        counts = data['action_counts']
+        # choose action by max count; if there's a tie, pick one at random
+        max_count = max(counts.values())
+        candidates = [a for a, c in counts.items() if c == max_count]
+        rep['action'] = _pick_action_weighted(candidates) if candidates else (rep.get('action') or 'deny')
+        uniq.append(rep)
 
     # Apply max policies limit with generalization
     max_policies = args.max_policies or cfg.get('max_policies', 1000)
@@ -634,15 +663,25 @@ def main():
                                 'priority': priority
                             },
                             'specificity': specificity,
-                            'count': 1
+                            'count': 1,
+                            'action_counts': { (action or 'deny').lower(): 1 }
                         }
                     else:
-                        # increment count and resolve action conflicts by precedence
+                        # increment count and track action counts (majority decides)
                         by_pattern[key]['count'] += 1
-                        existing_action = by_pattern[key]['rule'].get('action', 'deny')
-                        # action_precedence defined earlier (deny>filter>grant)
-                        if action_precedence.get(action.lower(), 1) > action_precedence.get(existing_action.lower(), 1):
-                            by_pattern[key]['rule']['action'] = action
+                        ac = by_pattern[key].setdefault('action_counts', {})
+                        ac[action.lower()] = ac.get(action.lower(), 0) + 1
+                        # prefer representative rule with higher priority
+                        if priority > by_pattern[key]['rule'].get('priority', 0):
+                            by_pattern[key]['rule'] = {
+                                'topic': pattern,
+                                'static': static,
+                                'dynamic': rule.get('dynamic', ''),
+                                'filter': rule.get('filter', ''),
+                                'hints': rule.get('hints', ''),
+                                'action': action,
+                                'priority': priority
+                            }
             else:
                 # Keep non-standard patterns as-is; use priority in key and
                 # resolve action conflicts if multiple appear for same key
@@ -651,13 +690,16 @@ def main():
                     by_pattern[key] = {
                         'rule': rule,
                         'specificity': 4,  # Higher specificity for unique patterns
-                        'count': 1
+                        'count': 1,
+                        'action_counts': { (action or 'deny').lower(): 1 }
                     }
                 else:
                     by_pattern[key]['count'] += 1
-                    existing_action = by_pattern[key]['rule'].get('action', 'deny')
-                    if action_precedence.get(action.lower(), 1) > action_precedence.get(existing_action.lower(), 1):
-                        by_pattern[key]['rule']['action'] = action
+                    ac = by_pattern[key].setdefault('action_counts', {})
+                    ac[action.lower()] = ac.get(action.lower(), 0) + 1
+                    # prefer representative if this has higher priority
+                    if priority > by_pattern[key]['rule'].get('priority', 0):
+                        by_pattern[key]['rule'] = rule
         
         # Generalization config
         gen_cfg = cfg.get('generalization', {})
@@ -665,6 +707,14 @@ def main():
         distribution = gen_cfg.get('distribution_strategy', 'proportional')
 
         # Create groups based on configured grouping_key
+        # finalize generalized pattern actions by majority; break ties randomly
+        for _k, _entry in list(by_pattern.items()):
+                ac = _entry.get('action_counts', {})
+                if ac:
+                    maxc = max(ac.values())
+                    cands = [a for a, c in ac.items() if c == maxc]
+                    _entry['rule']['action'] = _pick_action_weighted(cands) if cands else _entry['rule'].get('action')
+
         groups = {}
         for item in by_pattern.values():
             rule = item['rule']

@@ -98,8 +98,8 @@
     "devices": ["dev"]
   },
   "action_probabilities": {
-    "grant": 0.7,
-    "deny": 0.3,
+    "grant": 0.5,
+    "deny": 0.5,
     "filter": 0.0
   },
   "role_priorities": {
