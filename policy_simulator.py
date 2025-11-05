@@ -3,6 +3,8 @@ import argparse
 import itertools
 import random
 import string
+import re
+from collections import defaultdict
 from typing import List, Dict
 
 def load_config(path: str) -> dict:
@@ -123,12 +125,12 @@ def expand_base_policies(cfg: dict) -> List[dict]:
                 if dname in mapping:
                     for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                         mapping[alias] = mapping[dname]
-            # ensure dev alias exists
-            mapping.setdefault('dev', '')
+            # format template using mapping; any missing placeholders become '+'
+            mapping_filled = defaultdict(lambda: '+', mapping)
             try:
-                topic = p['topic_template'].format(**mapping)
+                topic = p['topic_template'].format_map(mapping_filled)
             except Exception:
-                # fallback to template literal if format fails
+                # if formatting fails (malformed template), fall back to literal
                 topic = p['topic_template']
             # normalize double slashes
             topic = topic.replace('//', '/')
@@ -188,12 +190,8 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
         return vals if vals else ['']
 
     # Get device capability mapping from config (attribute -> device types)
-    device_map = cfg.get('device_capability_map', {
-        # Default fallback for backward compatibility
-        'video': ['cam'],
-        'alarm': ['proximity'],
-        'facilities': ['tstat', 'thermostat']
-    })
+    # Require explicit mapping in config; default to empty mapping if absent
+    device_map = cfg.get('device_capability_map', {})
 
     # build userid -> username map
     uid_to_user = {}
@@ -286,20 +284,18 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                             # Support both single alias string and list of aliases
                             for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                 mapping[alias] = val
-                                    
-                    # Ensure device aliases exist for backward compatibility
-                    if 'device_types' in mapping and 'dev' not in mapping:
-                        mapping['dev'] = mapping['device_types']
-                    if 'devices' in mapping and 'dev' not in mapping:
-                        mapping['dev'] = mapping['devices']
+                    
+                    # No implicit device alias fallbacks; alias_map must provide required aliases
 
                     # optional building filter
                     bval = mapping.get('b', '')
                     if 'building_suffix' in rdef and not str(bval).endswith(rdef['building_suffix']):
                         continue
 
+                    # format restriction template; missing placeholders become '+'
+                    mapping_filled = defaultdict(lambda: '+', mapping)
                     try:
-                        topic = t_template.format(**mapping)
+                        topic = t_template.format_map(mapping_filled)
                     except Exception:
                         topic = t_template
                     topic = topic.replace('//', '/').strip('/')
@@ -315,36 +311,6 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                         'hints': 'subj',
                         'action': action,
                         'priority': base_priority + priority_offset
-                    })
-        else:
-            # Backwards-compatible fallback: original intern-specific rules if no config provided
-            if role == 'intern':
-                buildings = _vals('buildings')
-                for b in buildings:
-                    if not b:
-                        continue
-                    if str(b).endswith('2'):
-                        topic = f"{b}/#"
-                        action = choose_action({'action': 'deny'}, cfg)
-                        rules.append({
-                            'topic': topic,
-                            'static': f"subj.username=='{username}'",
-                            'dynamic': '',
-                            'filter': '',
-                            'hints': 'subj',
-                            'action': action,
-                            'priority': base_priority + cfg.get('security_restriction_bonus', 5)
-                        })
-                    topic = f"{b}/f3/#"
-                    action = choose_action({'action': 'deny'}, cfg)
-                    rules.append({
-                        'topic': topic,
-                        'static': f"subj.username=='{username}'",
-                        'dynamic': '',
-                        'filter': '',
-                        'hints': 'subj',
-                        'action': action,
-                        'priority': 1
                     })
 
         # For each attribute that maps to devices, grant per-user access to those device topics
@@ -378,10 +344,11 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                                 for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                     mapping[alias] = val
                         
-                        # Ensure dev alias exists for backward compatibility
+                        # Set 'dev' alias for template formatting
                         mapping['dev'] = dev
                         try:
-                            topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
+                            mapping_filled = defaultdict(lambda: '+', mapping)
+                            topic = "{b}/{fl}/{r}/{dev}/#".format_map(mapping_filled)
                         except Exception:
                             # fall back to manual join
                             parts = [mapping.get('b', ''), mapping.get('fl', ''), mapping.get('r', ''), dev]
@@ -431,10 +398,11 @@ def generate_user_attribute_rules(cfg: dict) -> List[dict]:
                                 for alias in (aliases if isinstance(aliases, (list, tuple)) else [aliases]):
                                     mapping[alias] = val
                                     
-                        # Ensure dev alias exists
+                        # Set 'dev' alias for template formatting
                         mapping['dev'] = dev
                         try:
-                            topic = "{b}/{fl}/{r}/{dev}/#".format(**mapping)
+                            mapping_filled = defaultdict(lambda: '+', mapping)
+                            topic = "{b}/{fl}/{r}/{dev}/#".format_map(mapping_filled)
                         except Exception:
                             parts = [mapping.get('b', ''), mapping.get('fl', ''), mapping.get('r', ''), dev]
                             topic = '/'.join([p for p in parts if p]) + '/#'
@@ -553,58 +521,60 @@ def main():
             random.seed(seed)
         except Exception:
             pass
-    rules = expand_base_policies(cfg)
-    # generate per-user and per-attribute dynamic rules
-    user_rules = generate_user_attribute_rules(cfg)
-    rules.extend(user_rules)
-    # Deduplicate rules by (topic, static, dynamic, priority), resolving action conflicts by configured weights.
-    def _pick_action_weighted(candidates):
-        probs = cfg.get('action_probabilities', {}) or {}
-        # build weights in same order as candidates
-        weights = []
-        total = 0.0
-        for a in candidates:
-            try:
-                w = float(probs.get(a, 0) or 0)
-            except Exception:
-                w = 0.0
-            weights.append(w)
-            total += w
-        if total <= 0:
-            return random.choice(candidates)
-        return random.choices(candidates, weights=weights, k=1)[0]
-
-    # Aggregate rules by (topic, static, dynamic, priority) and count actions.
+    # Track unique rules and their variants as we generate them
     grouped = {}
-    for r in rules:
-        key = (r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'))
-        g = grouped.get(key)
-        if g is None:
-            # store representative rule and action counts
-            grouped[key] = {
-                'rep': r.copy(),
-                'action_counts': { (r.get('action') or 'deny').lower(): 1 }
+    max_policies = args.max_policies or cfg.get('max_policies', 1000)
+    
+    def add_rule(rule, count=1):
+        key = (rule.get('topic'), rule.get('static'), rule.get('dynamic'), rule.get('priority'))
+        group = grouped.get(key)
+        
+        if group is None:
+            # New unique rule
+            group = {
+                'rule': rule.copy(),
+                'counts': {(rule.get('action') or 'deny').lower(): count},
+                'variants': {(rule.get('action') or 'deny').lower(): rule.copy()}
             }
-            continue
-
-        # increment action count
-        act = (r.get('action') or 'deny').lower()
-        counts = g['action_counts']
-        counts[act] = counts.get(act, 0) + 1
-
-        # keep the representative rule as the one with highest numeric priority
-        if r.get('priority', 0) > g['rep'].get('priority', 0):
-            g['rep'] = r.copy()
-
-    # finalize unique rules by selecting the action with the highest count; on tie prefer grant
+            grouped[key] = group
+        else:
+            # Update existing rule group
+            act = (rule.get('action') or 'deny').lower()
+            group['counts'][act] = group['counts'].get(act, 0) + count
+            
+            # Store variant if it has a different action
+            if act not in group['variants']:
+                variant = rule.copy()
+                group['variants'][act] = variant
+            
+            # Keep highest priority rule as representative
+            if rule.get('priority', 0) > group['rule'].get('priority', 0):
+                group['rule'] = rule.copy()
+    
+    # Generate and track all rules
+    for rule in expand_base_policies(cfg):
+        add_rule(rule)
+    
+    for rule in generate_user_attribute_rules(cfg):
+        add_rule(rule)
+    
+    # First create list of primary rules with most common actions
     uniq = []
-    for key, data in grouped.items():
-        rep = data['rep']
-        counts = data['action_counts']
-        max_count = max(counts.values())
-        candidates = [a for a, c in counts.items() if c == max_count]
-        rep['action'] = _pick_action_weighted(candidates) if candidates else (rep.get('action') or 'deny')
-        uniq.append(rep)
+    for data in grouped.values():
+        rule = data['rule']
+        
+        # Use action counts as probabilities for weighted selection
+        policy = {'action_probabilities': data['counts']}
+        rule['action'] = choose_action(policy, cfg)
+        uniq.append(rule)
+        
+        # Store alternate variants for potential use
+        variants = []
+        main_action = rule['action']
+        for act, variant in data['variants'].items():
+            if act != main_action:
+                variants.append((data['counts'].get(act, 0), variant))
+        data['remaining_variants'] = sorted(variants, key=lambda x: (-x[0], -x[1].get('priority', 0)))
 
     # Apply max policies limit with generalization
     max_policies = args.max_policies or cfg.get('max_policies', 1000)
@@ -702,11 +672,11 @@ def main():
 
         # Create groups based on configured grouping_key
         for _k, _entry in list(by_pattern.items()):
-                ac = _entry.get('action_counts', {})
-                if ac:
-                    maxc = max(ac.values())
-                    cands = [a for a, c in ac.items() if c == maxc]
-                    _entry['rule']['action'] = _pick_action_weighted(cands) if cands else _entry['rule'].get('action')
+                # Resolve actions using counts as probabilities
+                counts = _entry.get('action_counts', {})
+                if counts:
+                    policy = {'action_probabilities': counts}
+                    _entry['rule']['action'] = choose_action(policy, cfg)
 
         groups = {}
         for item in by_pattern.values():
@@ -820,37 +790,40 @@ def main():
 
         uniq = selected
 
-    # If after deduplication/generalization we still have fewer than the
-    # requested max_policies, refill from the original grouped entries
-    max_policies = args.max_policies or cfg.get('max_policies', 1000)
-    if max_policies > 0 and len(uniq) < max_policies:
-        need = max_policies - len(uniq)
-        # track existing final keys including action so we don't add exact duplicates
-        existing_keys = set((r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'), r.get('action')) for r in uniq)
-
-        # build candidate list from grouped originals: (count, candidate_rule)
-        candidates = []
-        for g in grouped.values():
-            rep = g.get('rep', {})
-            for a, cnt in g.get('action_counts', {}).items():
-                key = (rep.get('topic'), rep.get('static'), rep.get('dynamic'), rep.get('priority'), a)
-                if key in existing_keys:
-                    continue
-                cand = rep.copy()
-                cand['action'] = a
-                candidates.append((cnt, cand))
-
-        # prefer candidates with higher original counts and higher priority
-        candidates.sort(key=lambda x: (-x[0], -x[1].get('priority', 0)))
-
-        for cnt, cand in candidates:
-            if len(uniq) >= max_policies:
-                break
-            k = (cand.get('topic'), cand.get('static'), cand.get('dynamic'), cand.get('priority'), cand.get('action'))
-            if k in existing_keys:
-                continue
-            uniq.append(cand)
-            existing_keys.add(k)
+    # After generalization, fill up to max_policies with remaining variants
+    if max_policies > 0:
+        # First check if we need to reduce via generalization
+        if len(uniq) > max_policies:
+            print(f'Generalizing to limit output to {max_policies} policies (from {len(uniq)} total)')
+            # Previous generalization logic remains...
+        else:
+            # Fill up to max_policies using variants
+            existing_keys = set((r.get('topic'), r.get('static'), r.get('dynamic'), 
+                               r.get('priority'), r.get('action')) for r in uniq)
+            
+            # Build prioritized list of all remaining variants
+            candidates = []
+            for data in grouped.values():
+                for count, variant in data.get('remaining_variants', []):
+                    key = (variant.get('topic'), variant.get('static'), variant.get('dynamic'),
+                          variant.get('priority'), variant.get('action'))
+                    if key not in existing_keys:
+                        candidates.append((count, variant))
+            
+            # Sort by count and priority
+            candidates.sort(key=lambda x: (-x[0], -x[1].get('priority', 0)))
+            
+            # Add variants until we hit max_policies
+            for count, variant in candidates:
+                if len(uniq) >= max_policies:
+                    break
+                key = (variant.get('topic'), variant.get('static'), variant.get('dynamic'),
+                      variant.get('priority'), variant.get('action'))
+                if key not in existing_keys:
+                    uniq.append(variant)
+                    existing_keys.add(key)
+            
+            print(f'Filled policy set to {len(uniq)} rules using {len(candidates)} available variants')
 
     write_sql(cfg, uniq, args.out)
     print(f'Wrote {len(uniq)} rules to {args.out}')
