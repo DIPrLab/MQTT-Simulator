@@ -827,6 +827,41 @@ def main():
 
         uniq = selected
 
+    # If after deduplication/generalization we still have fewer than the
+    # requested max_policies, refill from the original grouped entries by
+    # restoring per-action variants that were collapsed earlier (e.g. both
+    # grant and deny for the same matching key). This preserves separate
+    # grant/deny logic while attempting to reach the requested output size.
+    max_policies = args.max_policies or cfg.get('max_policies', 1000)
+    if max_policies > 0 and len(uniq) < max_policies:
+        need = max_policies - len(uniq)
+        # track existing final keys including action so we don't add exact duplicates
+        existing_keys = set((r.get('topic'), r.get('static'), r.get('dynamic'), r.get('priority'), r.get('action')) for r in uniq)
+
+        # build candidate list from grouped originals: (count, candidate_rule)
+        candidates = []
+        for g in grouped.values():
+            rep = g.get('rep', {})
+            for a, cnt in g.get('action_counts', {}).items():
+                key = (rep.get('topic'), rep.get('static'), rep.get('dynamic'), rep.get('priority'), a)
+                if key in existing_keys:
+                    continue
+                cand = rep.copy()
+                cand['action'] = a
+                candidates.append((cnt, cand))
+
+        # prefer candidates with higher original counts and higher priority
+        candidates.sort(key=lambda x: (-x[0], -x[1].get('priority', 0)))
+
+        for cnt, cand in candidates:
+            if len(uniq) >= max_policies:
+                break
+            k = (cand.get('topic'), cand.get('static'), cand.get('dynamic'), cand.get('priority'), cand.get('action'))
+            if k in existing_keys:
+                continue
+            uniq.append(cand)
+            existing_keys.add(k)
+
     write_sql(cfg, uniq, args.out)
     print(f'Wrote {len(uniq)} rules to {args.out}')
 
